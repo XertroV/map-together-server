@@ -1,4 +1,4 @@
-use crate::{mt_codec::MTDecode, read_lp_string, slice_to_lp_string, StreamErr};
+use crate::{mt_codec::{MTDecode, MTEncode}, read_lp_string, slice_to_lp_string, StreamErr};
 
 
 pub const MAPPING_MSG_PLACE: u8 = 1;
@@ -63,8 +63,8 @@ impl MTDecode for MacroblockSpec {
         }
         cur += 4;
 
-        let skin_count = u32::from_le_bytes([buf[cur], buf[cur + 1], buf[cur + 2], buf[cur + 3]]);
-        cur += 4;
+        let skin_count = u16::from_le_bytes([buf[cur], buf[cur + 1]]);
+        cur += 2;
         if skin_count > 0 {
             return Err(StreamErr::InvalidData("skins not implemented".to_string()));
         }
@@ -75,8 +75,8 @@ impl MTDecode for MacroblockSpec {
         }
         cur += 4;
 
-        let item_count = u32::from_le_bytes([buf[cur], buf[cur + 1], buf[cur + 2], buf[cur + 3]]);
-        cur += 4;
+        let item_count = u16::from_le_bytes([buf[cur], buf[cur + 1]]);
+        cur += 2;
         for _ in 0..item_count {
             let item = ItemSpec::decode(&buf[cur..])?;
             cur += 2 + item.name.len() + 4 + 2 + item.author.len() + 12 + 1 + 12 + 4 + 1 + 1 + 1 + 36 + 12 + 1 + 2 + 4 + 4;
@@ -86,6 +86,25 @@ impl MTDecode for MacroblockSpec {
             items.push(item);
         }
         Ok(MacroblockSpec { blocks, items })
+    }
+}
+
+impl MTEncode for MacroblockSpec {
+    fn encode(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(MAGIC_BLOCKS);
+        buf.extend_from_slice(&(self.blocks.len() as u16).to_le_bytes());
+        for block in &self.blocks {
+            buf.extend_from_slice(&block.encode());
+        }
+        buf.extend_from_slice(MAGIC_SKINS);
+        buf.extend_from_slice(&0u16.to_le_bytes());
+        buf.extend_from_slice(MAGIC_ITEMS);
+        buf.extend_from_slice(&(self.items.len() as u16).to_le_bytes());
+        for item in &self.items {
+            buf.extend_from_slice(&item.encode());
+        }
+        buf
     }
 }
 
@@ -100,6 +119,16 @@ impl MTDecode for SkinSpec {
         let path = slice_to_lp_string(&buf[0..])?;
         let apply_type = SkinApplyType::decode(&buf[(2 + path.len())..])?;
         Ok(SkinSpec { path, apply_type })
+    }
+}
+
+impl MTEncode for SkinSpec {
+    fn encode(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(self.path.len() as u16).to_le_bytes());
+        buf.extend_from_slice(&self.path.as_bytes());
+        buf.extend_from_slice(&self.apply_type.encode());
+        buf
     }
 }
 
@@ -163,6 +192,43 @@ impl MTDecode for SkinApplyType {
     }
 }
 
+impl MTEncode for SkinApplyType {
+    fn encode(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        match self {
+            SkinApplyType::NormBlock { coord, dir, ident } => {
+                buf.push(0);
+                buf.extend_from_slice(&coord[0].to_le_bytes());
+                buf.extend_from_slice(&coord[1].to_le_bytes());
+                buf.extend_from_slice(&coord[2].to_le_bytes());
+                buf.push(*dir);
+                buf.extend_from_slice(&(ident.len() as u16).to_le_bytes());
+                buf.extend_from_slice(ident.as_bytes());
+            }
+            SkinApplyType::GhostBlock { coord, dir, ident } => {
+                buf.push(1);
+                buf.extend_from_slice(&coord[0].to_le_bytes());
+                buf.extend_from_slice(&coord[1].to_le_bytes());
+                buf.extend_from_slice(&coord[2].to_le_bytes());
+                buf.push(*dir);
+                buf.extend_from_slice(&(ident.len() as u16).to_le_bytes());
+                buf.extend_from_slice(ident.as_bytes());
+            }
+            SkinApplyType::FreeBlock { pos, pyr, ident } => {
+                buf.push(2);
+                buf.extend_from_slice(&pos[0].to_le_bytes());
+                buf.extend_from_slice(&pos[1].to_le_bytes());
+                buf.extend_from_slice(&pos[2].to_le_bytes());
+                buf.extend_from_slice(&pyr[0].to_le_bytes());
+                buf.extend_from_slice(&pyr[1].to_le_bytes());
+                buf.extend_from_slice(&pyr[2].to_le_bytes());
+                buf.extend_from_slice(&(ident.len() as u16).to_le_bytes());
+                buf.extend_from_slice(ident.as_bytes());
+            }
+        }
+        buf
+    }
+}
 
 /*
 angelscript code for Block and Item specs:
@@ -305,11 +371,68 @@ impl MTDecode for BlockSpec {
     }
 }
 
+
+impl MTEncode for BlockSpec {
+    fn encode(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(self.name.len() as u16).to_le_bytes());
+        buf.extend_from_slice(self.name.as_bytes());
+        buf.extend_from_slice(&self.collection.to_le_bytes());
+        buf.extend_from_slice(&(self.author.len() as u16).to_le_bytes());
+        buf.extend_from_slice(self.author.as_bytes());
+        buf.extend_from_slice(&self.coord[0].to_le_bytes());
+        buf.extend_from_slice(&self.coord[1].to_le_bytes());
+        buf.extend_from_slice(&self.coord[2].to_le_bytes());
+        buf.push(self.dir);
+        buf.push(self.dir2);
+        buf.extend_from_slice(&self.pos[0].to_le_bytes());
+        buf.extend_from_slice(&self.pos[1].to_le_bytes());
+        buf.extend_from_slice(&self.pos[2].to_le_bytes());
+        buf.extend_from_slice(&self.pyr[0].to_le_bytes());
+        buf.extend_from_slice(&self.pyr[1].to_le_bytes());
+        buf.extend_from_slice(&self.pyr[2].to_le_bytes());
+        buf.push(self.color);
+        buf.push(self.lm_qual);
+        buf.extend_from_slice(&self.mobil_ix.to_le_bytes());
+        buf.extend_from_slice(&self.mobil_variant.to_le_bytes());
+        buf.extend_from_slice(&self.variant.to_le_bytes());
+        buf.push(self.flags);
+        if let Some(waypoint) = &self.waypoint {
+            buf.push(1);
+            buf.extend_from_slice(&waypoint.encode());
+        } else {
+            buf.push(0);
+        }
+        buf
+    }
+}
+
 #[derive(Debug)]
 pub struct WaypointSpec {
     decoded_len: usize,
     tag: String,
     order: u32,
+}
+
+impl MTDecode for WaypointSpec {
+    fn decode(buf: &[u8]) -> Result<Self, StreamErr> {
+        let mut cur = 0;
+        let tag = slice_to_lp_string(&buf[cur..])?;
+        cur += 2 + tag.len();
+        let order = u32::from_le_bytes([buf[cur], buf[cur + 1], buf[cur + 2], buf[cur + 3]]);
+        cur += 4;
+        Ok(WaypointSpec { decoded_len: cur, tag, order })
+    }
+}
+
+impl MTEncode for WaypointSpec {
+    fn encode(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(self.tag.len() as u16).to_le_bytes());
+        buf.extend_from_slice(self.tag.as_bytes());
+        buf.extend_from_slice(&self.order.to_le_bytes());
+        buf
+    }
 }
 
 #[derive(Debug)]
@@ -429,13 +552,50 @@ impl MTDecode for ItemSpec {
     }
 }
 
-impl MTDecode for WaypointSpec {
-    fn decode(buf: &[u8]) -> Result<Self, StreamErr> {
-        let mut cur = 0;
-        let tag = slice_to_lp_string(&buf[cur..])?;
-        cur += 2 + tag.len();
-        let order = u32::from_le_bytes([buf[cur], buf[cur + 1], buf[cur + 2], buf[cur + 3]]);
-        cur += 4;
-        Ok(WaypointSpec { decoded_len: cur, tag, order })
+impl MTEncode for ItemSpec {
+    fn encode(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(self.name.len() as u16).to_le_bytes());
+        buf.extend_from_slice(self.name.as_bytes());
+        buf.extend_from_slice(&self.collection.to_le_bytes());
+        buf.extend_from_slice(&(self.author.len() as u16).to_le_bytes());
+        buf.extend_from_slice(self.author.as_bytes());
+        buf.extend_from_slice(&self.coord[0].to_le_bytes());
+        buf.extend_from_slice(&self.coord[1].to_le_bytes());
+        buf.extend_from_slice(&self.coord[2].to_le_bytes());
+        buf.push(self.dir);
+        buf.extend_from_slice(&self.pos[0].to_le_bytes());
+        buf.extend_from_slice(&self.pos[1].to_le_bytes());
+        buf.extend_from_slice(&self.pos[2].to_le_bytes());
+        buf.extend_from_slice(&self.pyr[0].to_le_bytes());
+        buf.extend_from_slice(&self.pyr[1].to_le_bytes());
+        buf.extend_from_slice(&self.pyr[2].to_le_bytes());
+        buf.extend_from_slice(&self.scale.to_le_bytes());
+        buf.push(self.color);
+        buf.push(self.lm_qual);
+        buf.push(self.phase);
+        buf.extend_from_slice(&self.visual_rot[0].to_le_bytes());
+        buf.extend_from_slice(&self.visual_rot[1].to_le_bytes());
+        buf.extend_from_slice(&self.visual_rot[2].to_le_bytes());
+        buf.extend_from_slice(&self.visual_rot[3].to_le_bytes());
+        buf.extend_from_slice(&self.visual_rot[4].to_le_bytes());
+        buf.extend_from_slice(&self.visual_rot[5].to_le_bytes());
+        buf.extend_from_slice(&self.visual_rot[6].to_le_bytes());
+        buf.extend_from_slice(&self.visual_rot[7].to_le_bytes());
+        buf.extend_from_slice(&self.visual_rot[8].to_le_bytes());
+        buf.extend_from_slice(&self.pivot_pos[0].to_le_bytes());
+        buf.extend_from_slice(&self.pivot_pos[1].to_le_bytes());
+        buf.extend_from_slice(&self.pivot_pos[2].to_le_bytes());
+        buf.push(self.is_flying);
+        buf.extend_from_slice(&self.variant_ix.to_le_bytes());
+        buf.extend_from_slice(&self.associated_block_ix.to_le_bytes());
+        buf.extend_from_slice(&self.item_group_on_block.to_le_bytes());
+        if let Some(waypoint) = &self.waypoint {
+            buf.push(1);
+            buf.extend_from_slice(&waypoint.encode());
+        } else {
+            buf.push(0);
+        }
+        buf
     }
 }

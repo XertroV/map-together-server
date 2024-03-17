@@ -3,7 +3,7 @@ use managers::*;
 use op_auth::*;
 use simple_logger::SimpleLogger;
 use std::sync::Arc;
-use tokio::{net::TcpListener, sync::Mutex, sync::RwLock};
+use tokio::{net::TcpListener, sync::RwLock};
 
 mod msgs;
 mod managers;
