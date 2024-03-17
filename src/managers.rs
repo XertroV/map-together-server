@@ -6,7 +6,7 @@ use std::ops::DerefMut;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use crate::map_actions::{MacroblockSpec, MapAction, SkinSpec, WaypointSpec};
+use crate::map_actions::{MacroblockSpec, MapAction, SkinSpec, WaypointSpec, MAPPING_MSG_DELETE, MAPPING_MSG_PLACE, MAPPING_MSG_PLAYER_JOIN, MAPPING_MSG_PLAYER_LEAVE, MAPPING_MSG_RESYNC, MAPPING_MSG_SET_MAPNAME, MAPPING_MSG_SET_SKIN, MAPPING_MSG_SET_WAYPOINT};
 use crate::msgs::{generate_room_id, room_id_to_str, str_to_room_id, RoomConnectionDeets, RoomCreationDeets, RoomMsg};
 use crate::mt_codec::{MTDecode, MTEncode};
 use crate::{check_token, TokenResp};
@@ -128,7 +128,7 @@ impl Player {
         let msg_ty = stream.read_u8().await?;
         // expect to read MapAction via MAPPING_MSG_* constants
         match msg_ty {
-            1 => {
+            MAPPING_MSG_PLACE => {
                 // Place
                 let len = stream.read_u32_le().await?;
                 let mut buf = vec![0u8; len as usize];
@@ -136,7 +136,7 @@ impl Player {
                 let mb = MacroblockSpec::decode(&buf)?;
                 Ok(MapAction::Place(mb))
             },
-            2 => {
+            MAPPING_MSG_DELETE => {
                 // Delete
                 let len = stream.read_u32_le().await?;
                 let mut buf = vec![0u8; len as usize];
@@ -144,29 +144,29 @@ impl Player {
                 let mb = MacroblockSpec::decode(&buf)?;
                 Ok(MapAction::Delete(mb))
             },
-            3 => {
+            MAPPING_MSG_RESYNC => {
                 // resync
                 Ok(MapAction::Resync())
             },
-            4 => {
+            MAPPING_MSG_SET_SKIN => {
                 // set skin
                 let len = stream.read_u32_le().await?;
                 let mut buf = vec![0u8; len as usize];
                 stream.read_exact(&mut buf).await?;
                 Ok(MapAction::SetSkin(SkinSpec::decode(&buf)?))
             },
-            5 => {
+            MAPPING_MSG_SET_WAYPOINT => {
                 // set waypoint
                 let len = stream.read_u32_le().await?;
                 let mut buf = vec![0u8; len as usize];
                 stream.read_exact(&mut buf).await?;
                 Ok(MapAction::SetWaypoint(WaypointSpec::decode(&buf)?))
             },
-            6 => {
+            MAPPING_MSG_SET_MAPNAME => {
                 // set map name
                 Ok(MapAction::SetMapName(read_lp_string(stream).await?))
             }
-            7 => {
+            MAPPING_MSG_PLAYER_JOIN => {
                 // player join
                 let len = stream.read_u32_le().await?;
                 let mut buf = vec![0u8; len as usize];
@@ -175,7 +175,7 @@ impl Player {
                 let login = slice_to_lp_string(&buf[4 + 2 + name.len()..])?;
                 Ok(MapAction::PlayerJoin { name, login })
             }
-            8 => {
+            MAPPING_MSG_PLAYER_LEAVE => {
                 // player leave
                 let len = stream.read_u32_le().await?;
                 let mut buf = vec![0u8; len as usize];
@@ -286,7 +286,9 @@ impl Room {
             let elapsed = start.elapsed().unwrap();
             let elapsed_ms = elapsed.as_millis() as f64 + carry;
             if elapsed_ms < loop_max_ms {
-                tokio::time::sleep(tokio::time::Duration::from_millis((loop_max_ms - elapsed_ms).round() as u64)).await;
+                let sleep_for = (loop_max_ms - elapsed_ms).round();
+                log::debug!("Sleeping for: {}", sleep_for);
+                tokio::time::sleep(tokio::time::Duration::from_millis(sleep_for as u64)).await;
             }
             carry = (start.elapsed().unwrap().as_secs_f64() * 1000.0 - loop_max_ms).max(0.0);
         }

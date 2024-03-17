@@ -50,7 +50,8 @@ impl MTDecode for MacroblockSpec {
         cur += 2;
         for _ in 0..block_count {
             let block = BlockSpec::decode(&buf[cur..])?;
-            cur += 2 + block.name.len() + 4 + 2 + block.author.len() + 12 + 2 + 12 + 1 + 1 + 4 + 4 + 4 + 1;
+            // cur += 2 + block.name.len() + 4 + 2 + block.author.len() + 12 + 2 + 12 + 1 + 1 + 4 + 4 + 4 + 1;
+            cur += block.decoded_len;
             if let Some(waypoint) = &block.waypoint {
                 cur += 2 + waypoint.tag.len() + 4;
             }
@@ -79,7 +80,8 @@ impl MTDecode for MacroblockSpec {
         cur += 2;
         for _ in 0..item_count {
             let item = ItemSpec::decode(&buf[cur..])?;
-            cur += 2 + item.name.len() + 4 + 2 + item.author.len() + 12 + 1 + 12 + 4 + 1 + 1 + 1 + 36 + 12 + 1 + 2 + 4 + 4;
+            // cur += 2 + item.name.len() + 4 + 2 + item.author.len() + 12 + 1 + 12 + 4 + 1 + 1 + 1 + 36 + 12 + 1 + 2 + 4 + 4;
+            cur += item.decoded_len;
             if let Some(waypoint) = &item.waypoint {
                 cur += 2 + waypoint.tag.len() + 4;
             }
