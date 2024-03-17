@@ -1,0 +1,5 @@
+{
+    "secret": "string",
+    "url": "string",
+    "plugin_id": 123
+}
