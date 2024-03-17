@@ -6,10 +6,12 @@ pub const MAPPING_MSG_RESYNC: u8 = 3;
 pub const MAPPING_MSG_SET_SKIN: u8 = 4;
 pub const MAPPING_MSG_SET_WAYPOINT: u8 = 5;
 pub const MAPPING_MSG_SET_MAPNAME: u8 = 6;
+pub const MAPPING_MSG_PLAYER_JOIN: u8 = 6;
+pub const MAPPING_MSG_PLAYER_LEAVE: u8 = 6;
 
 
-
-enum MapAction {
+#[derive(Debug)]
+pub enum MapAction {
     Place(MacroblockSpec),
     Delete(MacroblockSpec),
     Resync(),
@@ -18,7 +20,8 @@ enum MapAction {
     SetMapName(String),
 }
 
-struct MacroblockSpec {
+#[derive(Debug)]
+pub struct MacroblockSpec {
     blocks: Vec<BlockSpec>,
     items: Vec<ItemSpec>,
 }
@@ -73,16 +76,21 @@ class ItemSpec : NetworkSerializable {
 }
 */
 
+#[derive(Debug)]
 pub struct SkinSpec {
     name: String,
     apply_type: SkinApplyType,
 
 }
 
-enum SkinApplyType {
-
+#[derive(Debug)]
+pub enum SkinApplyType {
+    NormBlock { coord: [u32; 3], dir: u8, ident: String },
+    GhostBlock { coord: [u32; 3], dir: u8, ident: String },
+    FreeBlock { pos: [f32; 3], pyr: [f32; 3], ident: String },
 }
 
+#[derive(Debug)]
 pub struct BlockSpec {
     name: String,
     collection: u32,
@@ -101,11 +109,13 @@ pub struct BlockSpec {
     waypoint: Option<WaypointSpec>,
 }
 
+#[derive(Debug)]
 pub struct WaypointSpec {
     tag: String,
     order: u32,
 }
 
+#[derive(Debug)]
 pub struct ItemSpec {
     name: String,
     collection: u32,

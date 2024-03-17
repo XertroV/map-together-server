@@ -1,10 +1,11 @@
 use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, RwLock};
+use tokio::net::TcpStream;
+use tokio::sync::RwLock;
 use std::collections::HashMap;
 use std::ops::DerefMut;
-use std::sync::{Arc};
+use std::sync::Arc;
 
+use crate::map_actions::MapAction;
 use crate::msgs::{generate_room_id, room_id_to_str, str_to_room_id, RoomConnectionDeets, RoomCreationDeets, RoomMsg};
 use crate::{check_token, TokenResp};
 
@@ -154,7 +155,8 @@ impl RoomManager {
                     RoomMsg::Join(deets) => {
                         log::debug!("RoomConnectionDeets: {:?}", deets);
                         // Join room
-                        let room = match self.rooms.read().await.get(&str_to_room_id(&deets.room_id).unwrap()) {
+                        let rooms = self.rooms.read().await;
+                        let room = match rooms.get(&str_to_room_id(&deets.room_id).unwrap()) {
                             Some(room) => room,
                             None => {
                                 log::warn!("Room not found: {}", deets.room_id);
@@ -166,18 +168,14 @@ impl RoomManager {
                     }
                     RoomMsg::Unk(ty, msg) => {
                         log::warn!("Unknown message type: {} - {}", ty, msg);
-                        let _ = player.stream.write_all(b"ERR").await;
-                        let _ = write_lp_string(&mut player.stream, "unknown message type").await;
-                        player.shutdown().await;
+                        player.shutdown_err("unknown message type").await;
                         return;
                     }
                 }
             }
             Err(e) => {
                 log::error!("Error reading room message: {:?}", e);
-                let _ = player.stream.write_all(b"ERR").await;
-                let _ = write_lp_string(&mut player.stream, "error reading room message").await;
-                player.shutdown().await;
+                player.shutdown_err("error reading room message").await;
             }
         }
     }
