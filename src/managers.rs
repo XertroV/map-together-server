@@ -251,6 +251,8 @@ impl Room {
             }
         }
         let loop_max_hz = 100.0;
+        let loop_max_ms = 1000.0 / loop_max_hz;
+        let mut carry = 0.0;
         // main loop
         loop {
             let start = SystemTime::now();
@@ -282,9 +284,11 @@ impl Room {
             }
 
             let elapsed = start.elapsed().unwrap();
-            if elapsed.as_millis() < 10 {
-                tokio::time::sleep(tokio::time::Duration::from_millis(self.action_rate_limit as u64 - elapsed.as_millis() as u64)).await;
+            let elapsed_ms = elapsed.as_millis() as f64 + carry;
+            if elapsed_ms < loop_max_ms {
+                tokio::time::sleep(tokio::time::Duration::from_millis((loop_max_ms - elapsed_ms).round() as u64)).await;
             }
+            carry = (start.elapsed().unwrap().as_secs_f64() * 1000.0 - loop_max_ms).max(0.0);
         }
     }
 
