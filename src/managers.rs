@@ -234,6 +234,14 @@ pub async fn read_lp_string(stream: &mut TcpStream) -> Result<String, StreamErr>
     Ok(String::from_utf8(buf.to_vec())?)
 }
 
+pub fn slice_to_lp_string(buf: &[u8]) -> Result<String, StreamErr> {
+    if buf.len() < 2 {
+        return Err(StreamErr::Io(io::Error::new(io::ErrorKind::InvalidData, "buffer too small")));
+    }
+    let len = u16::from_le_bytes([buf[0], buf[1]]) as usize;
+    Ok(String::from_utf8_lossy(&buf[2..(len + 2)]).into_owned())
+}
+
 pub async fn write_lp_string(stream: &mut TcpStream, s: &str) -> Result<(), StreamErr> {
     let len = s.len() as u16;
     stream.write_all(&len.to_le_bytes()).await?;
@@ -245,6 +253,7 @@ pub async fn write_lp_string(stream: &mut TcpStream, s: &str) -> Result<(), Stre
 pub enum StreamErr {
     Io(io::Error),
     Utf8(std::string::FromUtf8Error),
+    InvalidData(String),
 }
 
 impl From<io::Error> for StreamErr {
