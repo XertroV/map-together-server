@@ -577,6 +577,9 @@ impl InitializationManager {
         log::info!("Initializing connection: {:?}", stream);
 
         let token = read_lp_string(&mut stream).await;
+
+        log::info!("got token");
+
         if let Err(e) = token {
             log::error!("Error reading token: {:?}", e);
             let _ = stream.write_all(b"ERR").await;
@@ -586,6 +589,7 @@ impl InitializationManager {
         }
 
         let token = token.unwrap();
+        log::debug!("Got token of length: {}", token.len());
         let token_resp = match check_token(&token, 521).await {
             Some(token_resp) => token_resp,
             None => {
@@ -610,10 +614,20 @@ impl InitializationManager {
 
 pub async fn read_lp_string(stream: &mut TcpStream) -> Result<String, StreamErr> {
     let mut buf = [0u8; 2];
+    log::info!("About to read string len");
+    // match stream.peek(&mut buf).await {
+    //     Ok(_) => { log::info!("peeked: {:?}", buf); },
+    //     Err(e) => {
+    //         log::error!("Error peeking: {:?}", e);
+    //         return Err(StreamErr::Io(e));
+    //     }
+    // }
     stream.read_exact(&mut buf).await?;
     let len = u16::from_le_bytes(buf) as usize;
+    log::info!("Reading string of length: {}", len);
     let mut buf = vec![0u8; len];
     stream.read_exact(&mut buf).await?;
+    log::info!("Read string: {:?}", buf);
     Ok(String::from_utf8(buf)?)
 }
 
