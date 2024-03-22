@@ -12,6 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::map_actions::{MacroblockSpec, MapAction, PlayerID, SetSkinSpec, SkinSpec, WaypointSpec, MAPPING_MSG_DELETE, MAPPING_MSG_PLACE, MAPPING_MSG_PLAYER_JOIN, MAPPING_MSG_PLAYER_LEAVE, MAPPING_MSG_RESYNC, MAPPING_MSG_SET_MAPNAME, MAPPING_MSG_SET_SKIN, MAPPING_MSG_SET_WAYPOINT};
 use crate::msgs::{generate_room_id, room_id_to_str, str_to_room_id, RoomConnectionDeets, RoomCreationDeets, RoomMsg};
 use crate::mt_codec::{MTDecode, MTEncode};
+use crate::player_loop::run_player_loop;
 use crate::{check_token, TokenResp};
 
 
@@ -35,6 +36,14 @@ impl Player {
         Player { token_resp, stream: stream.into(), sync: RwLock::new(PlayerSync::default()) }
     }
 
+    pub fn get_name(&self) -> &str {
+        &self.token_resp.display_name
+    }
+
+    pub fn get_pid(&self) -> &str {
+        &self.token_resp.account_id
+    }
+
     pub async fn sync_actions(&self, actions: &Vec<(MapAction, PlayerID, SystemTime, OnceCell<Vec<u8>>)>) {
         let mut sync = self.sync.write().await;
         let new_actions = &actions[sync.last_sync..];
@@ -44,7 +53,7 @@ impl Player {
         log::trace!("Syncing actions: {:?} for player {:?}", new_actions.len(), self.token_resp.account_id);
         for action in new_actions {
             self.write_action(&action.0, &action.1, action.2, &action.3).await;
-            log::debug!("Wrote action: {:?} -> player {:?}", action.0, self.token_resp.account_id);
+            log::debug!("Wrote action: {:?} -> player {:?}", action.0.get_type(), self.token_resp.account_id);
         }
         sync.last_sync = actions.len();
     }
@@ -168,13 +177,20 @@ impl Player {
     }
 
     pub async fn await_readable(&self) -> Result<(), StreamErr> {
-        self.stream.read().await.readable().await?;
+        let s = self.stream.read().await;
+        s.readable().await?;
+        let mut buf = [0u8; 4];
+        s.peek(&mut buf).await?;
+        log::trace!("Peeked: {:?}", buf);
         Ok(())
     }
 
     pub async fn read_map_msg(&self) -> Result<MapAction, StreamErr> {
+        log::trace!("Awaiting readable map msg");
         self.await_readable().await?;
+        log::trace!("Reading map message");
         let mut _stream = self.stream.write().await;
+        log::trace!("Got write lock");
         let stream = _stream.deref_mut();
 
         let msg_ty = stream.read_u8().await?;
@@ -258,22 +274,22 @@ impl Player {
         self.shutdown().await;
     }
 
-    pub async fn run_loop(&self) {
-        loop {
-            let _ = self.await_readable().await;
-            let action = self.read_map_msg().await;
-            match action {
-                Ok(action) => {
-                    log::debug!("Read action: {:?}", action);
-                }
-                Err(e) => {
-                    log::error!("Error1 reading map message: {:?}", e);
-                    self.shutdown_err("error reading map message").await;
-                    break;
-                }
-            }
-        }
-    }
+    // pub async fn run_loop(&self) {
+    //     loop {
+    //         let _ = self.await_readable().await;
+    //         let action = self.read_map_msg().await;
+    //         match action {
+    //             Ok(action) => {
+    //                 log::debug!("Read action: {:?}", action);
+    //             }
+    //             Err(e) => {
+    //                 log::error!("Error1 reading map message: {:?}", e);
+    //                 self.shutdown_err("error reading map message").await;
+    //                 break;
+    //             }
+    //         }
+    //     }
+    // }
 }
 
 
@@ -288,6 +304,7 @@ pub struct Room {
     pub owner: RwLock<Arc<Player>>,
     pub mods: RwLock<Vec<Arc<Player>>>,
     pub actions: RwLock<Vec<(MapAction, PlayerID, SystemTime, OnceCell<Vec<u8>>)>>,
+    pub has_expired: OnceCell<()>,
 }
 
 
@@ -306,17 +323,44 @@ impl Room {
             owner: player_arc.clone().into(),
             mods: vec![].into(),
             actions: vec![].into(),
+            has_expired: OnceCell::new(),
         };
         let room = Arc::new(room);
         let room_clone = room.clone();
+        log::info!("Starting room: {:?} for {:?}", room.id_str, player_arc.get_pid());
         tokio::spawn(async move {
             room_clone.run().await;
         });
+        let room_clone = room.clone();
+        tokio::spawn(async move {
+            run_player_loop(player_arc, room_clone).await
+        });
+        log::info!("Room started: {:?}", room.id_str);
         room
     }
 
     pub async fn run(&self) {
-        log::debug!("Starting room: {:?}", self.id_str);
+        // check if we have no players every 10ms. If we have no players for 10 minutes, close the room.
+        let mut no_players = 0;
+        loop {
+            let players = self.players.read().await;
+            if players.len() == 0 {
+                no_players += 1;
+                if no_players > 60000 {
+                    log::info!("Room has no players for 10 minutes, closing room: {:?}", self.id_str);
+                    let _ = self.has_expired.set(());
+                    break;
+                }
+            } else {
+                no_players = 0;
+            }
+            drop(players);
+            time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// deprecated
+    pub async fn run_old(&self) {
         let players = self.players.read().await;
         // init any players we already have (probs just admin -- we will assume so atm)
         {
@@ -345,7 +389,7 @@ impl Room {
                     player.await_readable().await.ok().map(|_| player)
                 }));
             }
-            futures.push(tokio::spawn(async move { tokio::time::sleep(Duration::from_millis(1)).await; None }));
+            futures.push(tokio::spawn(async move { tokio::time::sleep(Duration::from_millis(4)).await; None }));
 
             let (res, _ix, rem) = futures::future::select_all(futures).await;
             // log::debug!("Res: {:?}", res);
@@ -477,17 +521,19 @@ impl Room {
         // }
     }
 
-    pub async fn add_player_via_join(&self, deets: RoomConnectionDeets, player: Player) {
+    pub async fn add_player_via_join(&self, deets: RoomConnectionDeets, player: Player) -> Arc<Player> {
         // Add player to room
         if self.password != deets.password {
             log::warn!("Invalid password for room: {}", deets.room_id);
             player.shutdown_err("invalid password").await;
-            return;
+            return player.into();
         }
-        self.send_player_room_details(&player).await;
-        let actions = self.actions.read().await;
-        player.sync_actions(&actions).await;
-        self.players.write().await.push(player.into());
+        // self.send_player_room_details(&player).await;
+        // let actions = self.actions.read().await;
+        // player.sync_actions(&actions).await;
+        let player_arc: Arc<_> = player.into();
+        self.players.write().await.push(player_arc.clone());
+        player_arc
     }
 
     pub async fn send_player_room_details(&self, player: &Player) {
@@ -496,7 +542,7 @@ impl Room {
         let _ = stream.write_u32_le(self.action_rate_limit).await;
     }
 
-    async fn player_left(&self, p: &Player) {
+    pub async fn player_left(&self, p: &Player) {
         log::debug!("getting players lock");
         let mut players = self.players.write().await;
         log::debug!("got players lock");
@@ -521,9 +567,31 @@ impl RoomManager {
         }
     }
 
-    pub async fn manage_room(&mut self, mut player: Player) {
+    pub async fn room_mgr_loop(&self) {
+        loop {
+            let rooms = self.rooms.read().await;
+            let mut to_remove = vec![];
+            for (id, room) in rooms.iter() {
+                if room.has_expired.initialized() {
+                    to_remove.push(*id);
+                    log::info!("Room expired: {:?}", room.id_str);
+                }
+            }
+            drop(rooms);
+            if to_remove.len() > 0 {
+                let mut rooms = self.rooms.write().await;
+                for id in to_remove {
+                    rooms.remove(&id);
+                }
+                drop(rooms);
+            }
+            time::sleep(Duration::from_secs(10)).await;
+        }
+    }
+
+    pub async fn manage_room(&self, mut player: Player) {
         // Room management logic here
-        log::debug!("Player connected: {:?}", player);
+        log::debug!("Player connected: {:?} / {:?}", player.get_name(), player.get_pid());
         // read commands from player.stream
         match player.read_room_msg().await {
             Ok(msg) => {
@@ -533,7 +601,10 @@ impl RoomManager {
                         log::debug!("RoomCreationDeets: {:?}", deets);
                         // Create room
                         let room: Arc<Room> = Room::start_new_room(player, deets).await;
+                        let room_id = room.id_str.clone();
+                        log::debug!("Adding room: {:?}", room.id_str);
                         self.rooms.write().await.insert(room.id, room);
+                        log::debug!("Added room: {:?}", room_id);
                     }
                     RoomMsg::Join(deets) => {
                         log::debug!("RoomConnectionDeets: {:?}", deets);
@@ -547,7 +618,8 @@ impl RoomManager {
                                 return;
                             }
                         };
-                        room.add_player_via_join(deets, player).await;
+                        let p = room.add_player_via_join(deets, player).await;
+                        run_player_loop(p, room.clone()).await;
                     }
                     RoomMsg::Unk(ty, msg) => {
                         log::warn!("Unknown message type: {} - {}", ty, msg);
@@ -574,11 +646,10 @@ impl InitializationManager {
     }
 
     pub async fn initialize_connection(&self, mut stream: TcpStream) {
-        log::info!("Initializing connection: {:?}", stream);
+        let peer = stream.peer_addr().expect("to get peer addr");
+        log::info!("Initializing connection from: {:?}", peer);
 
         let token = read_lp_string(&mut stream).await;
-
-        log::info!("got token");
 
         if let Err(e) = token {
             log::error!("Error reading token: {:?}", e);
@@ -588,12 +659,15 @@ impl InitializationManager {
             return;
         }
 
+        log::debug!("read token from {:?}", peer);
+
         let token = token.unwrap();
         log::debug!("Got token of length: {}", token.len());
+
         let token_resp = match check_token(&token, 521).await {
             Some(token_resp) => token_resp,
             None => {
-                log::warn!("Token not found!");
+                log::warn!("Token not verified!");
                 let _ = stream.write_all(b"ERR").await;
                 let _ = write_lp_string(&mut stream, "auth token verification failed").await;
                 stream.shutdown().await.unwrap();
@@ -606,15 +680,14 @@ impl InitializationManager {
         let player = Player::new(token_resp, stream);
 
         // Hand off to Room Manager
-        let mut rm = self.room_manager.write().await;
-        rm.manage_room(player).await;
+        self.room_manager.read().await.manage_room(player).await;
     }
 }
 
 
 pub async fn read_lp_string(stream: &mut TcpStream) -> Result<String, StreamErr> {
     let mut buf = [0u8; 2];
-    log::info!("About to read string len");
+    // log::info!("About to read string len");
     // match stream.peek(&mut buf).await {
     //     Ok(_) => { log::info!("peeked: {:?}", buf); },
     //     Err(e) => {
@@ -624,10 +697,10 @@ pub async fn read_lp_string(stream: &mut TcpStream) -> Result<String, StreamErr>
     // }
     stream.read_exact(&mut buf).await?;
     let len = u16::from_le_bytes(buf) as usize;
-    log::info!("Reading string of length: {}", len);
+    // log::info!("Reading string of length: {}", len);
     let mut buf = vec![0u8; len];
     stream.read_exact(&mut buf).await?;
-    log::info!("Read string: {:?}", buf);
+    // log::info!("Read string: {:?}", buf);
     Ok(String::from_utf8(buf)?)
 }
 

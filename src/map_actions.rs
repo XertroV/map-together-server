@@ -54,6 +54,28 @@ pub enum MapAction {
     ChangeAdmin(PlayerID),
 }
 
+
+impl MapAction {
+    pub fn get_type(&self) -> &'static str {
+        match self {
+            MapAction::Place(_) => "Place",
+            MapAction::Delete(_) => "Delete",
+            MapAction::Resync() => "Resync",
+            MapAction::SetSkin(_) => "SetSkin",
+            MapAction::SetWaypoint(_) => "SetWaypoint",
+            MapAction::SetMapName(_) => "SetMapName",
+            MapAction::PlayerJoin {..} => "PlayerJoin",
+            MapAction::PlayerLeave {..} => "PlayerLeave",
+            MapAction::PromoteMod(_) => "PromoteMod",
+            MapAction::DemoteMod(_) => "DemoteMod",
+            MapAction::KickPlayer(_) => "KickPlayer",
+            MapAction::BanPlayer(_) => "BanPlayer",
+            MapAction::ChangeAdmin(_) => "ChangeAdmin",
+        }
+    }
+}
+
+
 #[derive(Debug)]
 pub struct MacroblockSpec {
     blocks: Vec<BlockSpec>,

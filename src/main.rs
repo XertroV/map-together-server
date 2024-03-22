@@ -11,6 +11,7 @@ mod map_actions;
 mod mt_room;
 mod op_auth;
 mod mt_codec;
+mod player_loop;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 10)]
 async fn main() {
@@ -34,6 +35,11 @@ async fn run_server(
     init_manager: Arc<InitializationManager>,
     room_manager: Arc<RwLock<RoomManager>>,
 ) {
+    let room_mgr_c = room_manager.clone();
+    tokio::spawn(async move {
+        room_mgr_c.read().await.room_mgr_loop().await
+    });
+
     loop {
         let (socket, _) = listener
             .accept()
