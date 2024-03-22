@@ -48,7 +48,7 @@ pub fn str_to_room_id(s: &str) -> Option<u64> {
         return None;
     }
     let mut id = 0;
-    for (i, c) in s.chars().rev().enumerate() {
+    for (i, c) in s.chars().enumerate() {
         let pos = ALPHABET.find(c).unwrap();
         id += pos as u64 * 62u64.pow(i as u32);
     }

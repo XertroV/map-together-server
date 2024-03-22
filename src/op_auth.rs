@@ -51,6 +51,17 @@ pub async fn init_op_config() -> usize {
 }
 
 pub async fn check_token(token: &str, plugin_id: i32) -> Option<TokenResp> {
+    #[cfg(test)]
+    {
+        if token == "test_token" {
+            return Some(TokenResp {
+                account_id: "test_account_id".to_string(),
+                display_name: "test_display_name".to_string(),
+                token_time: 0,
+            });
+        }
+    }
+
     let configs = PLUGIN_SITE_ID_TO_OP_CONFIG.read().await;
     let config = match configs.get(&plugin_id) {
         Some(config) => config,

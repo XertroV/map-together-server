@@ -1,15 +1,20 @@
 use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::RwLock;
+use tokio::sync::{OnceCell, RwLock};
+use tokio::{select, time};
 use std::collections::HashMap;
+
+use futures::future::{self, Either};
 use std::ops::DerefMut;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::map_actions::{MacroblockSpec, MapAction, SkinSpec, WaypointSpec, MAPPING_MSG_DELETE, MAPPING_MSG_PLACE, MAPPING_MSG_PLAYER_JOIN, MAPPING_MSG_PLAYER_LEAVE, MAPPING_MSG_RESYNC, MAPPING_MSG_SET_MAPNAME, MAPPING_MSG_SET_SKIN, MAPPING_MSG_SET_WAYPOINT};
+use crate::map_actions::{MacroblockSpec, MapAction, PlayerID, SetSkinSpec, SkinSpec, WaypointSpec, MAPPING_MSG_DELETE, MAPPING_MSG_PLACE, MAPPING_MSG_PLAYER_JOIN, MAPPING_MSG_PLAYER_LEAVE, MAPPING_MSG_RESYNC, MAPPING_MSG_SET_MAPNAME, MAPPING_MSG_SET_SKIN, MAPPING_MSG_SET_WAYPOINT};
 use crate::msgs::{generate_room_id, room_id_to_str, str_to_room_id, RoomConnectionDeets, RoomCreationDeets, RoomMsg};
 use crate::mt_codec::{MTDecode, MTEncode};
 use crate::{check_token, TokenResp};
+
+
 
 
 #[derive(Debug, Default)]
@@ -30,69 +35,109 @@ impl Player {
         Player { token_resp, stream: stream.into(), sync: RwLock::new(PlayerSync::default()) }
     }
 
-    pub async fn sync_actions(&self, actions: &Vec<MapAction>) {
+    pub async fn sync_actions(&self, actions: &Vec<(MapAction, PlayerID, SystemTime, OnceCell<Vec<u8>>)>) {
         let mut sync = self.sync.write().await;
         let new_actions = &actions[sync.last_sync..];
+        if new_actions.len() == 0 {
+            return;
+        }
+        log::trace!("Syncing actions: {:?} for player {:?}", new_actions.len(), self.token_resp.account_id);
         for action in new_actions {
-            self.write_action(action).await;
+            self.write_action(&action.0, &action.1, action.2, &action.3).await;
+            log::debug!("Wrote action: {:?} -> player {:?}", action.0, self.token_resp.account_id);
         }
         sync.last_sync = actions.len();
     }
 
-    pub async fn write_action(&self, action: &MapAction) {
+    pub async fn write_action(&self, action: &MapAction, pid: &PlayerID, time: SystemTime, buf: &OnceCell<Vec<u8>>) {
         let mut stream = self.stream.write().await;
+        let mut r = Ok(());
         match action {
             MapAction::Place(mb) => {
-                let buf = mb.encode();
-                stream.write_u8(1).await.unwrap();
-                stream.write_u32_le(buf.len() as u32).await.unwrap();
-                stream.write_all(&buf).await.unwrap();
+                if buf.initialized() {
+                    r = stream.write_all(&buf.get().unwrap()).await;
+                } else {
+                    let mut new_buf = vec![];
+                    let mb_buf = mb.encode();
+                    new_buf.push(MAPPING_MSG_PLACE);
+                    new_buf.extend_from_slice(&(mb_buf.len() as u32).to_le_bytes());
+                    log::debug!("Wrote MB buf len: 0x{:x}", mb_buf.len() as u32);
+                    new_buf.extend_from_slice(&mb_buf);
+                    write_lp_string_to_buf(&mut new_buf, &pid.0);
+                    new_buf.extend_from_slice(&(time.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64).to_le_bytes());
+                    r = stream.write_all(&new_buf).await;
+                    new_buf.shrink_to_fit();
+                    buf.get_or_init(|| async move { new_buf }).await;
+                }
             }
             MapAction::Delete(mb) => {
-                let buf = mb.encode();
-                stream.write_u8(2).await.unwrap();
-                stream.write_u32_le(buf.len() as u32).await.unwrap();
-                stream.write_all(&buf).await.unwrap();
+                if buf.initialized() {
+                    r = stream.write_all(&buf.get().unwrap()).await;
+                } else {
+                    let mut new_buf = vec![];
+                    let mb_buf = mb.encode();
+                    new_buf.push(MAPPING_MSG_DELETE);
+                    new_buf.extend_from_slice(&(mb_buf.len() as u32).to_le_bytes());
+                    new_buf.extend_from_slice(&mb_buf);
+                    write_lp_string_to_buf(&mut new_buf, &pid.0);
+                    new_buf.extend_from_slice(&(time.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64).to_le_bytes());
+                    r = stream.write_all(&new_buf).await;
+                    new_buf.shrink_to_fit();
+                    buf.get_or_init(|| async move { new_buf }).await;
+                }
             }
             MapAction::Resync() => {
-                stream.write_u8(3).await.unwrap();
+                // don't send this to the client
+                // r = stream.write_u8(MAPPING_MSG_RESYNC).await.unwrap();
             }
-            MapAction::SetSkin(skin) => {
+            MapAction::SetSkin(skin,) => {
                 let buf = skin.encode();
-                stream.write_u8(4).await.unwrap();
+                r = stream.write_u8(MAPPING_MSG_SET_SKIN).await;
                 stream.write_u32_le(buf.len() as u32).await.unwrap();
                 stream.write_all(&buf).await.unwrap();
+                write_lp_string(&mut stream, &pid.0).await.unwrap();
+                stream.write_u64_le(time.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64).await.unwrap();
             }
             MapAction::SetWaypoint(wp) => {
                 let buf = wp.encode();
-                stream.write_u8(5).await.unwrap();
+                r = stream.write_u8(MAPPING_MSG_SET_WAYPOINT).await;
                 stream.write_u32_le(buf.len() as u32).await.unwrap();
                 stream.write_all(&buf).await.unwrap();
+                write_lp_string(&mut stream, &pid.0).await.unwrap();
+                stream.write_u64_le(time.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64).await.unwrap();
             }
             MapAction::SetMapName(name) => {
-                stream.write_u8(6).await.unwrap();
+                r = stream.write_u8(MAPPING_MSG_SET_MAPNAME).await;
                 write_lp_string(&mut stream, name).await.unwrap();
+                write_lp_string(&mut stream, &pid.0).await.unwrap();
+                stream.write_u64_le(time.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64).await.unwrap();
             }
-            MapAction::PlayerJoin { name, login } => {
+            MapAction::PlayerJoin { name, account_id } => {
                 let mut buf = vec![];
-                buf.extend_from_slice(&name.len().to_le_bytes());
-                buf.extend_from_slice(name.as_bytes());
-                buf.extend_from_slice(&login.len().to_le_bytes());
-                buf.extend_from_slice(login.as_bytes());
-                stream.write_u8(7).await.unwrap();
+                write_lp_string_to_buf(&mut buf, name);
+                r = stream.write_u8(MAPPING_MSG_PLAYER_JOIN).await;
                 stream.write_u32_le(buf.len() as u32).await.unwrap();
                 stream.write_all(&buf).await.unwrap();
+                write_lp_string(&mut stream, &account_id).await.unwrap();
+                stream.write_u64_le(time.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64).await.unwrap();
             }
-            MapAction::PlayerLeave { name, login } => {
+            MapAction::PlayerLeave { name, account_id } => {
                 let mut buf = vec![];
-                buf.extend_from_slice(&name.len().to_le_bytes());
-                buf.extend_from_slice(name.as_bytes());
-                buf.extend_from_slice(&login.len().to_le_bytes());
-                buf.extend_from_slice(login.as_bytes());
-                stream.write_u8(8).await.unwrap();
+                write_lp_string_to_buf(&mut buf, name);
+                r = stream.write_u8(MAPPING_MSG_PLAYER_LEAVE).await;
                 stream.write_u32_le(buf.len() as u32).await.unwrap();
                 stream.write_all(&buf).await.unwrap();
+                write_lp_string(&mut stream, &account_id).await.unwrap();
+                stream.write_u64_le(time.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64).await.unwrap();
             }
+            MapAction::PromoteMod(pid) => todo!(),
+            MapAction::DemoteMod(pid) => todo!(),
+            MapAction::KickPlayer(pid) => todo!(),
+            MapAction::BanPlayer(pid) => todo!(),
+            MapAction::ChangeAdmin(pid) => todo!(),
+        }
+        if r.is_err() {
+            log::error!("Error writing action to player: {:?}", r);
         }
     }
 
@@ -105,7 +150,7 @@ impl Player {
             1 => {
                 // Room creation
                 let password = read_lp_string(&mut stream).await?;
-                let action_rate_limit = stream.read_u32().await?;
+                let action_rate_limit = stream.read_u32_le().await?;
                 // Ok(format!("Room creation: password: {}, action_rate_limit: {}", password, action_rate_limit))
                 Ok(RoomMsg::Create(RoomCreationDeets { password, action_rate_limit }))
             }
@@ -122,18 +167,29 @@ impl Player {
         }
     }
 
+    pub async fn await_readable(&self) -> Result<(), StreamErr> {
+        self.stream.read().await.readable().await?;
+        Ok(())
+    }
+
     pub async fn read_map_msg(&self) -> Result<MapAction, StreamErr> {
+        self.await_readable().await?;
         let mut _stream = self.stream.write().await;
         let stream = _stream.deref_mut();
+
         let msg_ty = stream.read_u8().await?;
+        log::trace!("Read message type: {}", msg_ty);
         // expect to read MapAction via MAPPING_MSG_* constants
         match msg_ty {
             MAPPING_MSG_PLACE => {
                 // Place
                 let len = stream.read_u32_le().await?;
+                log::trace!("Reading place message with len: {}", len);
                 let mut buf = vec![0u8; len as usize];
                 stream.read_exact(&mut buf).await?;
+                log::trace!("Read place message: {:?}", buf);
                 let mb = MacroblockSpec::decode(&buf)?;
+                log::trace!("Decoded place message: {:?}", mb);
                 Ok(MapAction::Place(mb))
             },
             MAPPING_MSG_DELETE => {
@@ -153,7 +209,7 @@ impl Player {
                 let len = stream.read_u32_le().await?;
                 let mut buf = vec![0u8; len as usize];
                 stream.read_exact(&mut buf).await?;
-                Ok(MapAction::SetSkin(SkinSpec::decode(&buf)?))
+                Ok(MapAction::SetSkin(SetSkinSpec::decode(&buf)?))
             },
             MAPPING_MSG_SET_WAYPOINT => {
                 // set waypoint
@@ -172,8 +228,8 @@ impl Player {
                 let mut buf = vec![0u8; len as usize];
                 stream.read_exact(&mut buf).await?;
                 let name = slice_to_lp_string(&buf[4..])?;
-                let login = slice_to_lp_string(&buf[4 + 2 + name.len()..])?;
-                Ok(MapAction::PlayerJoin { name, login })
+                let account_id = slice_to_lp_string(&buf[4 + 2 + name.len()..])?;
+                Ok(MapAction::PlayerJoin { name, account_id })
             }
             MAPPING_MSG_PLAYER_LEAVE => {
                 // player leave
@@ -181,14 +237,13 @@ impl Player {
                 let mut buf = vec![0u8; len as usize];
                 stream.read_exact(&mut buf).await?;
                 let name = slice_to_lp_string(&buf[4..])?;
-                let login = slice_to_lp_string(&buf[4 + 2 + name.len()..])?;
-                Ok(MapAction::PlayerLeave { name, login })
+                let account_id = slice_to_lp_string(&buf[4 + 2 + name.len()..])?;
+                Ok(MapAction::PlayerLeave { name, account_id })
             }
             _ => {
                 Err(StreamErr::InvalidData(format!("Unknown message type: {}", msg_ty)))
             }
         }
-
     }
 
     pub async fn shutdown(&self) {
@@ -201,6 +256,23 @@ impl Player {
         let _ = write_lp_string(&mut stream, arg).await;
         drop(stream);
         self.shutdown().await;
+    }
+
+    pub async fn run_loop(&self) {
+        loop {
+            let _ = self.await_readable().await;
+            let action = self.read_map_msg().await;
+            match action {
+                Ok(action) => {
+                    log::debug!("Read action: {:?}", action);
+                }
+                Err(e) => {
+                    log::error!("Error1 reading map message: {:?}", e);
+                    self.shutdown_err("error reading map message").await;
+                    break;
+                }
+            }
+        }
     }
 }
 
@@ -215,7 +287,7 @@ pub struct Room {
     pub players: RwLock<Vec<Arc<Player>>>,
     pub owner: RwLock<Arc<Player>>,
     pub mods: RwLock<Vec<Arc<Player>>>,
-    pub actions: RwLock<Vec<MapAction>>,
+    pub actions: RwLock<Vec<(MapAction, PlayerID, SystemTime, OnceCell<Vec<u8>>)>>,
 }
 
 
@@ -244,39 +316,96 @@ impl Room {
     }
 
     pub async fn run(&self) {
+        log::debug!("Starting room: {:?}", self.id_str);
+        let players = self.players.read().await;
         // init any players we already have (probs just admin -- we will assume so atm)
         {
-            for p in self.players.read().await.iter() {
+            for p in players.iter() {
                 let _ = self.send_player_room_details(p).await;
+                // tokio::spawn( async move { p.run_loop().await });
             }
         }
+        drop(players);
+
         let loop_max_hz = 100.0;
         let loop_max_ms = 1000.0 / loop_max_hz;
         let mut carry = 0.0;
+
         // main loop
         loop {
             let start = SystemTime::now();
-            // read actions from players
-            let mut new_actions: Vec<MapAction> = vec![];
-            let mut buf = [0u8; 4];
-            for p in self.players.read().await.iter() {
-                // check if we can read a message
-                if let Ok(_) = p.stream.read().await.peek(&mut buf).await {
-                    match p.read_map_msg().await {
+
+            let mut leaving_player = None;
+
+            let mut futures: Vec<tokio::task::JoinHandle<Option<Arc<Player>>>> = vec![];
+            let players = self.players.read().await.clone();
+            for p in players.iter() {
+                let player = p.clone();
+                futures.push(tokio::spawn(async move {
+                    player.await_readable().await.ok().map(|_| player)
+                }));
+            }
+            futures.push(tokio::spawn(async move { tokio::time::sleep(Duration::from_millis(1)).await; None }));
+
+            let (res, _ix, rem) = futures::future::select_all(futures).await;
+            // log::debug!("Res: {:?}", res);
+            for f in rem {
+                f.abort();
+            }
+
+            match &res {
+                Ok(Some(player)) => {
+                    match player.read_map_msg().await {
                         Ok(action) => {
-                            new_actions.push(action);
+                            let action = (action, (&player.token_resp.account_id).into(), SystemTime::now(), OnceCell::new());
+                            self.actions.write().await.push(action);
                         }
                         Err(e) => {
-                            log::error!("Error reading map message: {:?}", e);
-                            p.shutdown_err("error reading map message").await;
+                            log::error!("Error2 reading map message: {:?}", e);
+                            player.shutdown_err("error reading map message").await;
+                            log::error!("shutdown player");
+                            let _ = leaving_player.replace(player.clone());
                         }
                     }
                 }
+                Ok(None) => {
+                    // log::debug!("No message to read from player: {:?}", &res);
+                }
+                Err(e) => {
+                    log::error!("Error reading from player: {:?}", &e);
+                }
             }
 
-            let mut actions = self.actions.write().await;
-            actions.append(&mut new_actions);
-            drop(actions);
+            drop(res);
+            drop(players);
+
+            if let Some(player) = leaving_player {
+                log::error!("Player left: {:?}", player);
+                self.player_left(&player).await;
+                log::error!("Finished player left");
+            }
+
+                // if let Some(player) = res {
+                //     match player {
+                //         Ok(player) => {
+                //             match player.read_map_msg().await {
+                //                 Ok(action) => {
+                //                     let action = (action, (&player.token_resp.account_id).into(), SystemTime::now(), OnceCell::new());
+                //                     self.actions.write().await.push(action);
+                //                 }
+                //                 Err(e) => {
+                //                     log::error!("Error reading map message: {:?}", e);
+                //                     player.shutdown_err("error reading map message").await;
+                //                     self.player_left(&player).await;
+                //                 }
+                //             }
+                //         }
+                //         Err(e) => {
+                //             log::error!("Error reading from player: {:?}", e);
+                //         }
+                //     }
+                // }
+            // }
 
             let actions = self.actions.read().await;
             for p in self.players.read().await.iter() {
@@ -287,11 +416,65 @@ impl Room {
             let elapsed_ms = elapsed.as_millis() as f64 + carry;
             if elapsed_ms < loop_max_ms {
                 let sleep_for = (loop_max_ms - elapsed_ms).round();
-                log::debug!("Sleeping for: {}", sleep_for);
-                tokio::time::sleep(tokio::time::Duration::from_millis(sleep_for as u64)).await;
+                tokio::time::sleep(Duration::from_millis(sleep_for as u64)).await;
+                carry = 0.0;
+            } else {
+                // carry = (elapsed.as_secs_f64() * 1000.0 + carry - loop_max_ms).max(0.0);
             }
-            carry = (start.elapsed().unwrap().as_secs_f64() * 1000.0 - loop_max_ms).max(0.0);
+            // log::trace!("Loop took: {} ms", start.elapsed().unwrap().as_millis());
         }
+        //     // read actions from players
+        //     let mut new_actions: Vec<_> = vec![];
+        //     let mut buf = [0u8; 4];
+        //     for p in self.players.read().await.iter() {
+        //         // log::debug!("Checking player: {:?}", p);
+        //         // check if we can read a message
+        //         let mut can_read = false;
+        //         if let Ok(size) = p.stream.read().await.peek(&mut buf).await {
+        //             can_read = size >= 4;
+        //         } else {
+        //             log::debug!("No message to read from player: {:?}", p);
+        //         }
+
+        //         if can_read {
+        //             log::debug!("Reading message from player: {:?}", p);
+        //             match p.read_map_msg().await {
+        //                 Ok(action) => {
+        //                     log::debug!("Read action: {:?}", action);
+        //                     new_actions.push((action, (&p.token_resp.account_id).into(), SystemTime::now(), OnceCell::new()));
+        //                 }
+        //                 Err(e) => {
+        //                     log::error!("Error reading map message: {:?}", e);
+        //                     p.shutdown_err("error reading map message").await;
+        //                     self.player_left(p).await;
+        //                 }
+        //             }
+        //         }
+        //     }
+
+        //     if new_actions.len() > 0 {
+        //         log::debug!("New actions: {:?}", new_actions);
+        //         let mut actions = self.actions.write().await;
+        //         actions.append(&mut new_actions);
+        //         drop(actions);
+        //     }
+
+        //     let actions = self.actions.read().await;
+        //     for p in self.players.read().await.iter() {
+        //         p.sync_actions(&actions).await;
+        //     }
+
+        //     let elapsed = start.elapsed().unwrap();
+        //     let elapsed_ms = elapsed.as_millis() as f64 + carry;
+        //     if elapsed_ms < loop_max_ms {
+        //         let sleep_for = (loop_max_ms - elapsed_ms).round();
+        //         // log::debug!("Sleeping for: {} ms", sleep_for);
+        //         tokio::time::sleep(tokio::time::Duration::from_millis(sleep_for as u64)).await;
+        //     } else {
+        //         log::debug!("Loop took too long: {} ms", elapsed_ms);
+        //     }
+        //     carry = (start.elapsed().unwrap().as_secs_f64() * 1000.0 - loop_max_ms).max(0.0);
+        // }
     }
 
     pub async fn add_player_via_join(&self, deets: RoomConnectionDeets, player: Player) {
@@ -302,13 +485,25 @@ impl Room {
             return;
         }
         self.send_player_room_details(&player).await;
+        let actions = self.actions.read().await;
+        player.sync_actions(&actions).await;
         self.players.write().await.push(player.into());
     }
 
     pub async fn send_player_room_details(&self, player: &Player) {
         let mut stream = player.stream.write().await;
         let _ = write_lp_string(&mut stream, &self.id_str).await;
-        let _ = stream.write_u32(self.action_rate_limit).await;
+        let _ = stream.write_u32_le(self.action_rate_limit).await;
+    }
+
+    async fn player_left(&self, p: &Player) {
+        log::debug!("getting players lock");
+        let mut players = self.players.write().await;
+        log::debug!("got players lock");
+        players.retain(|x| x.token_resp.account_id != p.token_resp.account_id);
+        let action = MapAction::PlayerLeave { name: p.token_resp.display_name.clone(), account_id: p.token_resp.account_id.clone() };
+        self.actions.write().await.push((action, (&p.token_resp.account_id).into(), SystemTime::now(), OnceCell::new()));
+        log::debug!("got actions lock");
     }
 }
 
@@ -419,7 +614,7 @@ pub async fn read_lp_string(stream: &mut TcpStream) -> Result<String, StreamErr>
     let len = u16::from_le_bytes(buf) as usize;
     let mut buf = vec![0u8; len];
     stream.read_exact(&mut buf).await?;
-    Ok(String::from_utf8(buf.to_vec())?)
+    Ok(String::from_utf8(buf)?)
 }
 
 pub fn slice_to_lp_string(buf: &[u8]) -> Result<String, StreamErr> {
@@ -427,6 +622,9 @@ pub fn slice_to_lp_string(buf: &[u8]) -> Result<String, StreamErr> {
         return Err(StreamErr::Io(io::Error::new(io::ErrorKind::InvalidData, "buffer too small")));
     }
     let len = u16::from_le_bytes([buf[0], buf[1]]) as usize;
+    if len > buf.len() - 2 {
+        return Err(StreamErr::Io(io::Error::new(io::ErrorKind::InvalidData, format!("buffer does not contain enough data: {}", len))));
+    }
     Ok(String::from_utf8_lossy(&buf[2..(len + 2)]).into_owned())
 }
 
@@ -435,6 +633,16 @@ pub async fn write_lp_string(stream: &mut TcpStream, s: &str) -> Result<(), Stre
     stream.write_all(&len.to_le_bytes()).await?;
     stream.write_all(s.as_bytes()).await?;
     Ok(())
+}
+
+pub fn write_lp_string_to_buf(buf: &mut Vec<u8>, s: &str) {
+    let len = s.len() as u16;
+    let buf_pre_len = buf.len();
+    log::debug!("Writing string to buf: {} / {:?}", len, s);
+    buf.extend_from_slice(&len.to_le_bytes());
+    buf.extend_from_slice(s.as_bytes());
+    let buf_post_len = buf.len();
+    log::debug!("Wrote string to buf: {:?}", &buf[buf_pre_len..buf_post_len]);
 }
 
 #[derive(Debug)]
@@ -453,5 +661,28 @@ impl From<io::Error> for StreamErr {
 impl From<std::string::FromUtf8Error> for StreamErr {
     fn from(e: std::string::FromUtf8Error) -> Self {
         StreamErr::Utf8(e)
+    }
+}
+
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_room_id() {
+        let id = generate_room_id();
+        let id_str = room_id_to_str(id);
+        let id2 = str_to_room_id(&id_str).unwrap();
+        assert_eq!(id, id2);
+    }
+
+    #[test]
+    fn test_room_id_str() {
+        let id_str = "YjERAS";
+        let id = str_to_room_id(id_str).unwrap();
+        let id2 = room_id_to_str(id);
+        assert_eq!(id_str, id2);
     }
 }
