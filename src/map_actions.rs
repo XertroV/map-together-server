@@ -1,4 +1,5 @@
 use crate::{mt_codec::{MTDecode, MTEncode}, read_lp_string, slice_to_lp_string, write_lp_string_to_buf, StreamErr};
+use crate::msgs::*;
 
 /// WSID
 #[derive(Debug)]
@@ -35,6 +36,8 @@ pub const MAPPING_MSG_DEMOTE_MOD: u8 = 10;
 pub const MAPPING_MSG_KICK_PLAYER: u8 = 11;
 pub const MAPPING_MSG_BAN_PLAYER: u8 = 12;
 pub const MAPPING_MSG_CHANGE_ADMIN: u8 = 13;
+pub const MAPPING_MSG_PLAYER_CAMCURSOR: u8 = 14;
+pub const MAPPING_MSG_PLAYER_VEHICLEPOS: u8 = 15;
 
 
 #[derive(Debug)]
@@ -52,10 +55,16 @@ pub enum MapAction {
     KickPlayer(PlayerID),
     BanPlayer(PlayerID),
     ChangeAdmin(PlayerID),
+    PlayerCamCursor(PlayerCamCursor),
+    VehiclePos(PlayerVehiclePos),
 }
 
 
 impl MapAction {
+    pub fn is_ephemeral(&self) -> bool {
+        matches!(self, MapAction::PlayerCamCursor(_) | MapAction::VehiclePos(_))
+    }
+
     pub fn get_type(&self) -> &'static str {
         match self {
             MapAction::Place(_) => "Place",
@@ -71,6 +80,8 @@ impl MapAction {
             MapAction::KickPlayer(_) => "KickPlayer",
             MapAction::BanPlayer(_) => "BanPlayer",
             MapAction::ChangeAdmin(_) => "ChangeAdmin",
+            MapAction::PlayerCamCursor(_) => "PlayerCamCursor",
+            MapAction::VehiclePos(_) => "VehiclePos",
         }
     }
 }
@@ -78,8 +89,8 @@ impl MapAction {
 
 #[derive(Debug)]
 pub struct MacroblockSpec {
-    blocks: Vec<BlockSpec>,
-    items: Vec<ItemSpec>,
+    pub blocks: Vec<BlockSpec>,
+    pub items: Vec<ItemSpec>,
 }
 
 const MAGIC_BLOCKS: &[u8; 4] = b"BLKs";
@@ -176,20 +187,27 @@ impl MTDecode for SetSkinSpec {
     fn decode(buf: &[u8]) -> Result<Self, StreamErr> {
         let pos = 0;
         let fg_skin = slice_to_lp_string(&buf[pos..])?;
+        log::debug!("fg_skin: {:?}", fg_skin);
         let pos = 2 + fg_skin.len();
         let bg_skin = slice_to_lp_string(&buf[pos..])?;
-        let pos = 2 + bg_skin.len();
+        let pos = pos +  2 + bg_skin.len();
+        log::debug!("bg_skin: {:?}", bg_skin);
+        log::debug!("next bytes: {:?}", &buf[pos..(pos+10)]);
         let block = if buf[pos] == 0 {
+            log::debug!("block is none");
             None
         } else {
-            Some(BlockSpec::decode(&buf[pos..])?)
+            log::debug!("block is some, {:?}", &buf[pos..pos+10]);
+            Some(BlockSpec::decode(&buf[pos+1..])?)
         };
+        log::debug!("read block, is_some: {:?}", block.is_some());
         let pos = pos + 1 + block.as_ref().map(|b| b.encoded_len).unwrap_or(0);
         let item = if buf[pos] == 0 {
             None
         } else {
-            Some(ItemSpec::decode(&buf[pos..])?)
+            Some(ItemSpec::decode(&buf[pos+1..])?)
         };
+        log::debug!("read item, is_some: {:?}", item.is_some());
         let pos = pos + 1 + item.as_ref().map(|i| i.decoded_len).unwrap_or(0);
         Ok(SetSkinSpec { fg_skin, bg_skin, block, item, enc_size: pos })
     }
@@ -411,12 +429,15 @@ pub struct BlockSpec {
 
 impl MTDecode for BlockSpec {
     fn decode(buf: &[u8]) -> Result<Self, StreamErr> {
+        log::debug!("decoding block spec");
         let mut cur = 0;
         let name = slice_to_lp_string(&buf[cur..])?;
+        log::debug!("block spec name: {:?}", name);
         cur += 2 + name.len();
         let collection = u32::from_le_bytes([buf[cur], buf[cur + 1], buf[cur + 2], buf[cur + 3]]);
         cur += 4;
         let author = slice_to_lp_string(&buf[cur..])?;
+        log::debug!("block spec author: {:?}", author);
         cur += 2 + author.len();
         let coord = [
             u32::from_le_bytes([buf[cur], buf[cur + 1], buf[cur + 2], buf[cur + 3]]),
@@ -428,6 +449,7 @@ impl MTDecode for BlockSpec {
         cur += 1;
         let dir2 = buf[cur];
         cur += 1;
+        log::debug!("block spec at pos");
         let pos = [
             f32::from_le_bytes([buf[cur], buf[cur + 1], buf[cur + 2], buf[cur + 3]]),
             f32::from_le_bytes([buf[cur + 4], buf[cur + 5], buf[cur + 6], buf[cur + 7]]),
@@ -452,6 +474,7 @@ impl MTDecode for BlockSpec {
         cur += 4;
         let flags = buf[cur];
         cur += 1;
+        log::debug!("block spec at waypoint");
         let waypoint = if buf[cur] == 0 {
             None
         } else {

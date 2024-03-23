@@ -32,6 +32,7 @@ pub async fn run_player_loop(player: Arc<Player>, room: Arc<Room>) {
             futures::pin_mut!(readable, timeout);
 
             // log::trace!("Player loop awaiting readable or timeout");
+            let mut emphemeral_action = None;
 
             select! {
                 _ = readable => {
@@ -39,9 +40,13 @@ pub async fn run_player_loop(player: Arc<Player>, room: Arc<Room>) {
                         Ok(action) => {
                             log::trace!("Player {:?} action: {:?}", player.get_name(), action.get_type());
                             let action = (action, player.get_pid().into(), SystemTime::now(), OnceCell::new());
-                            room.actions.write().await.push(action);
+                            if !action.0.is_ephemeral() {
+                                room.actions.write().await.push(action);
+                                sync_actions = true;
+                            } else {
+                                emphemeral_action = Some(action);
+                            }
                             // Sync actions to all players, consider optimizing this part
-                            sync_actions = true;
                         },
                         Err(e) => {
                             log::error!("Error reading map message from player {:?}: {:?}", player, e);
@@ -63,6 +68,12 @@ pub async fn run_player_loop(player: Arc<Player>, room: Arc<Room>) {
                 let actions = room.actions.read().await;
                 for p in room.players.read().await.iter() {
                     p.sync_actions(&actions).await;
+                }
+            }
+
+            if let Some(action) = emphemeral_action {
+                for p in room.players.read().await.iter() {
+                    p.write_action(&action.0, &action.1, action.2, &action.3).await;
                 }
             }
 
