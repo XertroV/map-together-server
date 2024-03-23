@@ -195,7 +195,7 @@ impl Player {
                     let mb_buf = cam_cursor.encode();
                     new_buf.push(MAPPING_MSG_PLAYER_CAMCURSOR);
                     new_buf.extend_from_slice(&(mb_buf.len() as u32).to_le_bytes());
-                    log::debug!("Wrote cam_cursor buf len: 0x{:x}", mb_buf.len() as u32);
+                    // log::debug!("Wrote cam_cursor buf len: 0x{:x}", mb_buf.len() as u32);
                     new_buf.extend_from_slice(&mb_buf);
                     write_lp_string_to_buf(&mut new_buf, &pid.0);
                     new_buf.extend_from_slice(
@@ -215,7 +215,7 @@ impl Player {
                     let mb_buf = veh_pos.encode();
                     new_buf.push(MAPPING_MSG_PLAYER_VEHICLEPOS);
                     new_buf.extend_from_slice(&(mb_buf.len() as u32).to_le_bytes());
-                    log::debug!("Wrote veh_pos buf len: 0x{:x}", mb_buf.len() as u32);
+                    // log::debug!("Wrote veh_pos buf len: 0x{:x}", mb_buf.len() as u32);
                     new_buf.extend_from_slice(&mb_buf);
                     write_lp_string_to_buf(&mut new_buf, &pid.0);
                     new_buf.extend_from_slice(
@@ -264,32 +264,32 @@ impl Player {
         s.readable().await?;
         let mut buf = [0u8; 4];
         s.peek(&mut buf).await?;
-        log::trace!("Peeked: {:?}", buf);
+        // log::trace!("Peeked: {:?}", buf);
         Ok(())
     }
 
     pub async fn read_map_msg(&self) -> Result<MapAction, StreamErr> {
-        log::trace!("Awaiting readable map msg");
+        // log::trace!("Awaiting readable map msg");
         self.await_readable().await?;
-        log::trace!("Reading map message");
+        // log::trace!("Reading map message");
         let mut _stream = self.stream.write().await;
-        log::trace!("Got write lock");
+        // log::trace!("Got write lock");
         let stream = _stream.deref_mut();
 
         let msg_ty = stream.read_u8().await?;
         let mut b = [0u8; 4];
         stream.peek(&mut b).await?;
-        log::trace!("Read message type: {} with len bytes: {:?}", msg_ty, b);
+        // log::trace!("Read message type: {} with len bytes: {:?}", msg_ty, b);
         // expect to read MapAction via MAPPING_MSG_* constants
         match msg_ty {
             MAPPING_MSG_PLACE => {
                 // Place
                 let len = stream.read_u32_le().await?;
-                log::trace!("Reading place message with len: {}", len);
+                // log::trace!("Reading place message with len: {}", len);
                 let mut buf = vec![0u8; len as usize];
                 stream.read_exact(&mut buf).await?;
                 let mb = MacroblockSpec::decode(&buf)?;
-                log::trace!("Decoded place message: B:{:?} / I:{:?}", mb.blocks.len(), mb.items.len());
+                // log::trace!("Decoded place message: B:{:?} / I:{:?}", mb.blocks.len(), mb.items.len());
                 Ok(MapAction::Place(mb))
             }
             MAPPING_MSG_DELETE => {
@@ -307,7 +307,7 @@ impl Player {
             MAPPING_MSG_SET_SKIN => {
                 // set skin
                 let len = stream.read_u32_le().await?;
-                log::debug!("Reading skin message with len: {}", len);
+                // log::debug!("Reading skin message with len: {}", len);
                 let mut buf = vec![0u8; len as usize];
                 stream.read_exact(&mut buf).await?;
                 Ok(MapAction::SetSkin(SetSkinSpec::decode(&buf)?))

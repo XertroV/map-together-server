@@ -38,7 +38,7 @@ pub async fn run_player_loop(player: Arc<Player>, room: Arc<Room>) {
                 _ = readable => {
                     match player.read_map_msg().await {
                         Ok(action) => {
-                            log::trace!("Player {:?} action: {:?}", player.get_name(), action.get_type());
+                            // log::trace!("Player {:?} action: {:?}", player.get_name(), action.get_type());
                             let action = (action, player.get_pid().into(), SystemTime::now(), OnceCell::new());
                             if !action.0.is_ephemeral() {
                                 room.actions.write().await.push(action);

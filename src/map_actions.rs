@@ -429,15 +429,15 @@ pub struct BlockSpec {
 
 impl MTDecode for BlockSpec {
     fn decode(buf: &[u8]) -> Result<Self, StreamErr> {
-        log::debug!("decoding block spec");
+        // log::debug!("decoding block spec");
         let mut cur = 0;
         let name = slice_to_lp_string(&buf[cur..])?;
-        log::debug!("block spec name: {:?}", name);
+        // log::debug!("block spec name: {:?}", name);
         cur += 2 + name.len();
         let collection = u32::from_le_bytes([buf[cur], buf[cur + 1], buf[cur + 2], buf[cur + 3]]);
         cur += 4;
         let author = slice_to_lp_string(&buf[cur..])?;
-        log::debug!("block spec author: {:?}", author);
+        // log::debug!("block spec author: {:?}", author);
         cur += 2 + author.len();
         let coord = [
             u32::from_le_bytes([buf[cur], buf[cur + 1], buf[cur + 2], buf[cur + 3]]),
@@ -449,7 +449,7 @@ impl MTDecode for BlockSpec {
         cur += 1;
         let dir2 = buf[cur];
         cur += 1;
-        log::debug!("block spec at pos");
+        // log::debug!("block spec at pos");
         let pos = [
             f32::from_le_bytes([buf[cur], buf[cur + 1], buf[cur + 2], buf[cur + 3]]),
             f32::from_le_bytes([buf[cur + 4], buf[cur + 5], buf[cur + 6], buf[cur + 7]]),
@@ -474,7 +474,7 @@ impl MTDecode for BlockSpec {
         cur += 4;
         let flags = buf[cur];
         cur += 1;
-        log::debug!("block spec at waypoint");
+        // log::debug!("block spec at waypoint");
         let waypoint = if buf[cur] == 0 {
             None
         } else {
