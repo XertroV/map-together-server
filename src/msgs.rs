@@ -18,6 +18,10 @@ pub struct RoomCreationDeets {
     pub action_rate_limit: u32,
 }
 
+/* todo
+    - choose map base, mood, size, base car
+*/
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct RoomConnectionDeets {
     pub room_id: String,

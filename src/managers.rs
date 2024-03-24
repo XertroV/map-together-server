@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use futures::stream;
 use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::{OnceCell, RwLock};
 use tokio::{select, time};
@@ -27,15 +29,18 @@ struct PlayerSync {
 #[derive(Debug)]
 pub struct Player {
     pub token_resp: TokenResp,
-    pub stream: RwLock<TcpStream>,
+    pub stream_r: Arc<RwLock<OwnedReadHalf>>,
+    pub stream_w: Arc<RwLock<OwnedWriteHalf>>,
     sync: RwLock<PlayerSync>,
 }
 
 impl Player {
     pub fn new(token_resp: TokenResp, stream: TcpStream) -> Self {
+        let (r, w) = stream.into_split();
         Player {
             token_resp,
-            stream: stream.into(),
+            stream_r: Arc::new(r.into()),
+            stream_w: Arc::new(w.into()),
             sync: RwLock::new(PlayerSync::default()),
         }
     }
@@ -50,38 +55,47 @@ impl Player {
 
     pub async fn sync_actions(
         &self,
-        actions: &Vec<(MapAction, PlayerID, SystemTime, OnceCell<Vec<u8>>)>,
+        actions: &Vec<Arc<(MapAction, PlayerID, SystemTime, OnceCell<Vec<u8>>)>>,
     ) {
         let mut sync = self.sync.write().await;
-        let new_actions = &actions[sync.last_sync..];
-        if new_actions.len() == 0 {
+        if sync.last_sync == actions.len() {
             return;
         }
+        let new_actions = actions[sync.last_sync..].to_vec();
         log::trace!(
             "Syncing actions: {:?} for player {:?}",
             new_actions.len(),
             self.token_resp.account_id
         );
-        for action in new_actions {
-            self.write_action(&action.0, &action.1, action.2, &action.3)
-                .await;
-            log::debug!(
-                "Wrote action: {:?} -> player {:?}",
-                action.0.get_type(),
-                self.token_resp.account_id
-            );
-        }
-        sync.last_sync = actions.len();
+        let stream = self.stream_w.clone();
+        let stream2 = stream.clone();
+        sync.last_sync += new_actions.len();
+        let stream_g = stream2.write().await;
+        drop(sync);
+        let name: String = self.get_name().into();
+        tokio::spawn(async move {
+            let mut stream = stream.write().await;
+            for action in new_actions {
+                Self::write_action(&mut *stream, &action.0, &action.1, action.2, &action.3)
+                    .await;
+                log::debug!(
+                    "Wrote action: {:?} -> player {:?}",
+                    action.0.get_type(),
+                    name
+                );
+            }
+        });
+        drop(stream_g);
     }
 
     pub async fn write_action(
-        &self,
+        mut stream: &mut OwnedWriteHalf,
         action: &MapAction,
         pid: &PlayerID,
         time: SystemTime,
         buf: &OnceCell<Vec<u8>>,
     ) {
-        let mut stream = self.stream.write().await;
+        // let mut stream = &mut *self.stream.write().await;
         let mut r = Ok(());
         match action {
             MapAction::Place(mb) => {
@@ -132,7 +146,7 @@ impl Player {
                 r = stream.write_u8(MAPPING_MSG_SET_SKIN).await;
                 stream.write_u32_le(buf.len() as u32).await.unwrap();
                 stream.write_all(&buf).await.unwrap();
-                write_lp_string(&mut stream, &pid.0).await.unwrap();
+                write_lp_string_owh(&mut stream, &pid.0).await.unwrap();
                 stream
                     .write_u64_le(time.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64)
                     .await
@@ -143,7 +157,7 @@ impl Player {
                 r = stream.write_u8(MAPPING_MSG_SET_WAYPOINT).await;
                 stream.write_u32_le(buf.len() as u32).await.unwrap();
                 stream.write_all(&buf).await.unwrap();
-                write_lp_string(&mut stream, &pid.0).await.unwrap();
+                write_lp_string_owh(&mut stream, &pid.0).await.unwrap();
                 stream
                     .write_u64_le(time.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64)
                     .await
@@ -151,8 +165,8 @@ impl Player {
             }
             MapAction::SetMapName(name) => {
                 r = stream.write_u8(MAPPING_MSG_SET_MAPNAME).await;
-                write_lp_string(&mut stream, name).await.unwrap();
-                write_lp_string(&mut stream, &pid.0).await.unwrap();
+                write_lp_string_owh(&mut stream, name).await.unwrap();
+                write_lp_string_owh(&mut stream, &pid.0).await.unwrap();
                 stream
                     .write_u64_le(time.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64)
                     .await
@@ -164,7 +178,7 @@ impl Player {
                 r = stream.write_u8(MAPPING_MSG_PLAYER_JOIN).await;
                 stream.write_u32_le(buf.len() as u32).await.unwrap();
                 stream.write_all(&buf).await.unwrap();
-                write_lp_string(&mut stream, &account_id).await.unwrap();
+                write_lp_string_owh(&mut stream, &account_id).await.unwrap();
                 stream
                     .write_u64_le(time.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64)
                     .await
@@ -176,7 +190,7 @@ impl Player {
                 r = stream.write_u8(MAPPING_MSG_PLAYER_LEAVE).await;
                 stream.write_u32_le(buf.len() as u32).await.unwrap();
                 stream.write_all(&buf).await.unwrap();
-                write_lp_string(&mut stream, &account_id).await.unwrap();
+                write_lp_string_owh(&mut stream, &account_id).await.unwrap();
                 stream
                     .write_u64_le(time.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64)
                     .await
@@ -234,13 +248,13 @@ impl Player {
     }
 
     pub async fn read_room_msg(&mut self) -> Result<RoomMsg, StreamErr> {
-        let mut _stream = self.stream.write().await;
+        let mut _stream = self.stream_r.write().await;
         let mut stream = _stream.deref_mut();
         let msg_ty = stream.read_u8().await?;
         match msg_ty {
             1 => {
                 // Room creation
-                let password = read_lp_string(&mut stream).await?;
+                let password = read_lp_string_owh(&mut stream).await?;
                 let action_rate_limit = stream.read_u32_le().await?;
                 // Ok(format!("Room creation: password: {}, action_rate_limit: {}", password, action_rate_limit))
                 Ok(RoomMsg::Create(RoomCreationDeets {
@@ -250,8 +264,8 @@ impl Player {
             }
             2 => {
                 // Room join
-                let room_id = read_lp_string(&mut stream).await?;
-                let password = read_lp_string(&mut stream).await?;
+                let room_id = read_lp_string_owh(&mut stream).await?;
+                let password = read_lp_string_owh(&mut stream).await?;
                 // Ok(format!("Room join: room_id: {}, password: {}", room_id, password))
                 Ok(RoomMsg::Join(RoomConnectionDeets { room_id, password }))
             }
@@ -260,7 +274,7 @@ impl Player {
     }
 
     pub async fn await_readable(&self) -> Result<(), StreamErr> {
-        let s = self.stream.read().await;
+        let mut s = self.stream_r.write().await;
         s.readable().await?;
         let mut buf = [0u8; 4];
         s.peek(&mut buf).await?;
@@ -272,7 +286,7 @@ impl Player {
         // log::trace!("Awaiting readable map msg");
         self.await_readable().await?;
         // log::trace!("Reading map message");
-        let mut _stream = self.stream.write().await;
+        let mut _stream = self.stream_r.write().await;
         // log::trace!("Got write lock");
         let stream = _stream.deref_mut();
 
@@ -321,7 +335,7 @@ impl Player {
             }
             MAPPING_MSG_SET_MAPNAME => {
                 // set map name
-                Ok(MapAction::SetMapName(read_lp_string(stream).await?))
+                Ok(MapAction::SetMapName(read_lp_string_owh(stream).await?))
             }
             // MAPPING_MSG_PLAYER_JOIN => {
             //     // player join
@@ -363,13 +377,13 @@ impl Player {
     }
 
     pub async fn shutdown(&self) {
-        let _ = self.stream.write().await.shutdown().await;
+        let _ = self.stream_w.write().await.shutdown().await;
     }
 
     pub async fn shutdown_err(&self, arg: &str) {
-        let mut stream = self.stream.write().await;
+        let mut stream = self.stream_w.write().await;
         let _ = stream.write_all(b"ERR").await;
-        let _ = write_lp_string(&mut stream, arg).await;
+        let _ = write_lp_string_owh(&mut stream, arg).await;
         drop(stream);
         self.shutdown().await;
     }
@@ -402,7 +416,7 @@ pub struct Room {
     pub players: RwLock<Vec<Arc<Player>>>,
     pub owner: RwLock<Arc<Player>>,
     pub mods: RwLock<Vec<Arc<Player>>>,
-    pub actions: RwLock<Vec<(MapAction, PlayerID, SystemTime, OnceCell<Vec<u8>>)>>,
+    pub actions: RwLock<Vec<Arc<(MapAction, PlayerID, SystemTime, OnceCell<Vec<u8>>)>>>,
     pub has_expired: OnceCell<()>,
 }
 
@@ -488,12 +502,12 @@ impl Room {
             (player.get_pid()).into(),
             SystemTime::now(),
             OnceCell::new(),
-        ));
+        ).into());
     }
 
     pub async fn send_player_room_details(&self, player: &Player) {
-        let mut stream = player.stream.write().await;
-        let _ = write_lp_string(&mut stream, &self.id_str).await;
+        let mut stream = player.stream_w.write().await;
+        let _ = write_lp_string_owh(&mut stream, &self.id_str).await;
         let _ = stream.write_u32_le(self.action_rate_limit).await;
     }
 
@@ -511,7 +525,7 @@ impl Room {
             (&p.token_resp.account_id).into(),
             SystemTime::now(),
             OnceCell::new(),
-        ));
+        ).into());
         log::debug!("got actions lock");
     }
 }
@@ -668,6 +682,15 @@ pub async fn read_lp_string(stream: &mut TcpStream) -> Result<String, StreamErr>
     Ok(String::from_utf8(buf)?)
 }
 
+pub async fn read_lp_string_owh(stream: &mut OwnedReadHalf) -> Result<String, StreamErr> {
+    let mut buf = [0u8; 2];
+    stream.read_exact(&mut buf).await?;
+    let len = u16::from_le_bytes(buf) as usize;
+    let mut buf = vec![0u8; len];
+    stream.read_exact(&mut buf).await?;
+    Ok(String::from_utf8(buf)?)
+}
+
 pub fn slice_to_lp_string(buf: &[u8]) -> Result<String, StreamErr> {
     if buf.len() < 2 {
         return Err(StreamErr::Io(io::Error::new(
@@ -687,6 +710,12 @@ pub fn slice_to_lp_string(buf: &[u8]) -> Result<String, StreamErr> {
 }
 
 pub async fn write_lp_string(stream: &mut TcpStream, s: &str) -> Result<(), StreamErr> {
+    let len = s.len() as u16;
+    stream.write_all(&len.to_le_bytes()).await?;
+    stream.write_all(s.as_bytes()).await?;
+    Ok(())
+}
+pub async fn write_lp_string_owh(stream: &mut OwnedWriteHalf, s: &str) -> Result<(), StreamErr> {
     let len = s.len() as u16;
     stream.write_all(&len.to_le_bytes()).await?;
     stream.write_all(s.as_bytes()).await?;

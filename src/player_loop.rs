@@ -32,7 +32,7 @@ pub async fn run_player_loop(player: Arc<Player>, room: Arc<Room>) {
             futures::pin_mut!(readable, timeout);
 
             // log::trace!("Player loop awaiting readable or timeout");
-            let mut emphemeral_action = None;
+            let mut ephemeral_action = None;
 
             select! {
                 _ = readable => {
@@ -41,10 +41,10 @@ pub async fn run_player_loop(player: Arc<Player>, room: Arc<Room>) {
                             // log::trace!("Player {:?} action: {:?}", player.get_name(), action.get_type());
                             let action = (action, player.get_pid().into(), SystemTime::now(), OnceCell::new());
                             if !action.0.is_ephemeral() {
-                                room.actions.write().await.push(action);
+                                room.actions.write().await.push(action.into());
                                 sync_actions = true;
                             } else {
-                                emphemeral_action = Some(action);
+                                ephemeral_action = Some(action);
                             }
                             // Sync actions to all players, consider optimizing this part
                         },
@@ -64,16 +64,23 @@ pub async fn run_player_loop(player: Arc<Player>, room: Arc<Room>) {
                 },
             }
 
-            if sync_actions {
-                let actions = room.actions.read().await;
-                for p in room.players.read().await.iter() {
-                    p.sync_actions(&actions).await;
-                }
-            }
+            if sync_actions || ephemeral_action.is_some() {
+                let players = room.players.read().await.clone();
 
-            if let Some(action) = emphemeral_action {
-                for p in room.players.read().await.iter() {
-                    p.write_action(&action.0, &action.1, action.2, &action.3).await;
+                if sync_actions {
+                    let actions = room.actions.read().await;
+                    for p in players.iter() {
+                        p.sync_actions(&actions).await;
+                    }
+                }
+
+                if let Some(action) = ephemeral_action {
+                    let players = room.players.read().await.clone();
+                    tokio::spawn(async move {
+                        for p in players.iter() {
+                            Player::write_action(&mut *p.stream_w.write().await, &action.0, &action.1, action.2, &action.3).await;
+                        }
+                    });
                 }
             }
 
