@@ -38,6 +38,7 @@ pub const MAPPING_MSG_BAN_PLAYER: u8 = 12;
 pub const MAPPING_MSG_CHANGE_ADMIN: u8 = 13;
 pub const MAPPING_MSG_PLAYER_CAMCURSOR: u8 = 14;
 pub const MAPPING_MSG_PLAYER_VEHICLEPOS: u8 = 15;
+pub const MAPPING_MSG_SET_ACTION_LIMIT: u8 = 16;
 
 
 #[derive(Debug)]
@@ -50,13 +51,14 @@ pub enum MapAction {
     SetMapName(String),
     PlayerJoin {name: String, account_id: String},
     PlayerLeave {name: String, account_id: String},
-    PromoteMod(PlayerID),
-    DemoteMod(PlayerID),
-    KickPlayer(PlayerID),
-    BanPlayer(PlayerID),
-    ChangeAdmin(PlayerID),
+    Admin_PromoteMod(PlayerID),
+    Admin_DemoteMod(PlayerID),
+    Admin_KickPlayer(PlayerID),
+    Admin_BanPlayer(PlayerID),
+    Admin_ChangeAdmin(PlayerID),
     PlayerCamCursor(PlayerCamCursor),
     VehiclePos(PlayerVehiclePos),
+    Admin_SetActionLimit(u32),
 }
 
 
@@ -75,13 +77,14 @@ impl MapAction {
             MapAction::SetMapName(_) => "SetMapName",
             MapAction::PlayerJoin {..} => "PlayerJoin",
             MapAction::PlayerLeave {..} => "PlayerLeave",
-            MapAction::PromoteMod(_) => "PromoteMod",
-            MapAction::DemoteMod(_) => "DemoteMod",
-            MapAction::KickPlayer(_) => "KickPlayer",
-            MapAction::BanPlayer(_) => "BanPlayer",
-            MapAction::ChangeAdmin(_) => "ChangeAdmin",
+            MapAction::Admin_PromoteMod(_) => "Admin_PromoteMod",
+            MapAction::Admin_DemoteMod(_) => "Admin_DemoteMod",
+            MapAction::Admin_KickPlayer(_) => "Admin_KickPlayer",
+            MapAction::Admin_BanPlayer(_) => "Admin_BanPlayer",
+            MapAction::Admin_ChangeAdmin(_) => "Admin_ChangeAdmin",
             MapAction::PlayerCamCursor(_) => "PlayerCamCursor",
             MapAction::VehiclePos(_) => "VehiclePos",
+            MapAction::Admin_SetActionLimit(_) => "Admin_SetActionLimit",
         }
     }
 }

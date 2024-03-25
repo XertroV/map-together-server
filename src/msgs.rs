@@ -16,11 +16,66 @@ pub enum RoomMsg {
 pub struct RoomCreationDeets {
     pub password: String,
     pub action_rate_limit: u32,
+    pub map_size: [u8; 3],
+    // low bits: mood (0-3), (3 reserved bits), ends with bit flags: NoStadium, Stadium, Stadium155
+    pub map_base: u8,
+    // base car: 0-3
+    pub base_car: u8,
+    // allow custom items?, allow delete?, allow selection cut?
+    pub rules_flags: u8,
+    pub item_max_size: u32,
 }
 
-/* todo
-    - choose map base, mood, size, base car
-*/
+impl RoomCreationDeets {
+    pub fn allow_custom_items(&self) -> bool {
+        self.rules_flags & 1 == 1
+    }
+    pub fn allow_delete_all(&self) -> bool {
+        self.rules_flags & 2 == 2
+    }
+    pub fn allow_selection_cut(&self) -> bool {
+        self.rules_flags & 4 == 4
+    }
+}
+
+impl MTEncode for RoomCreationDeets {
+    fn encode(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        write_lp_string_to_buf(&mut buf, &self.password);
+        buf.extend_from_slice(&self.action_rate_limit.to_le_bytes());
+        buf.extend_from_slice(&self.map_size);
+        buf.push(self.map_base);
+        buf.push(self.base_car);
+        buf.push(self.rules_flags);
+        buf.extend_from_slice(&self.item_max_size.to_le_bytes());
+        buf
+    }
+}
+
+impl MTDecode for RoomCreationDeets {
+    fn decode(buf: &[u8]) -> Result<Self, StreamErr> {
+        if buf.len() < 15 {
+            return Err(StreamErr::InvalidData(format!("RoomCreationDeets: not enough data, expected 15 bytes, got {}", buf.len())));
+        }
+        let password = slice_to_lp_string(&buf)?;
+        let mut idx = 2 + password.len();
+        let action_rate_limit = u32::from_le_bytes([buf[idx], buf[idx + 1], buf[idx + 2], buf[idx + 3]]);
+        idx += 4;
+        let mut map_size = [0; 3];
+        for i in 0..3 {
+            map_size[i] = buf[idx + i];
+        }
+        idx += 3;
+        let map_base = buf[idx];
+        idx += 1;
+        let base_car = buf[idx];
+        idx += 1;
+        let rules_flags = buf[idx];
+        idx += 1;
+        let item_max_size = u32::from_le_bytes([buf[idx], buf[idx + 1], buf[idx + 2], buf[idx + 3]]);
+        Ok(Self { password, action_rate_limit, map_size, map_base, base_car, rules_flags, item_max_size })
+    }
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct RoomConnectionDeets {

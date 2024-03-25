@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::map_actions::{
-    MacroblockSpec, MapAction, PlayerID, SetSkinSpec, SkinSpec, WaypointSpec, MAPPING_MSG_DELETE, MAPPING_MSG_PLACE, MAPPING_MSG_PLAYER_CAMCURSOR, MAPPING_MSG_PLAYER_JOIN, MAPPING_MSG_PLAYER_LEAVE, MAPPING_MSG_PLAYER_VEHICLEPOS, MAPPING_MSG_RESYNC, MAPPING_MSG_SET_MAPNAME, MAPPING_MSG_SET_SKIN, MAPPING_MSG_SET_WAYPOINT
+    MacroblockSpec, MapAction, PlayerID, SetSkinSpec, SkinSpec, WaypointSpec, MAPPING_MSG_DELETE, MAPPING_MSG_PLACE, MAPPING_MSG_PLAYER_CAMCURSOR, MAPPING_MSG_PLAYER_JOIN, MAPPING_MSG_PLAYER_LEAVE, MAPPING_MSG_PLAYER_VEHICLEPOS, MAPPING_MSG_RESYNC, MAPPING_MSG_SET_ACTION_LIMIT, MAPPING_MSG_SET_MAPNAME, MAPPING_MSG_SET_SKIN, MAPPING_MSG_SET_WAYPOINT
 };
 use crate::msgs::{
     generate_room_id, room_id_to_str, str_to_room_id, PlayerCamCursor, PlayerVehiclePos, RoomConnectionDeets, RoomCreationDeets, RoomMsg
@@ -196,11 +196,23 @@ impl Player {
                     .await
                     .unwrap();
             }
-            MapAction::PromoteMod(pid) => todo!(),
-            MapAction::DemoteMod(pid) => todo!(),
-            MapAction::KickPlayer(pid) => todo!(),
-            MapAction::BanPlayer(pid) => todo!(),
-            MapAction::ChangeAdmin(pid) => todo!(),
+            MapAction::Admin_PromoteMod(pid) => todo!(),
+            MapAction::Admin_DemoteMod(pid) => todo!(),
+            MapAction::Admin_KickPlayer(pid) => todo!(),
+            MapAction::Admin_BanPlayer(pid) => todo!(),
+            MapAction::Admin_ChangeAdmin(pid) => todo!(),
+            MapAction::Admin_SetActionLimit(limit) => {
+                let mut buf = vec![];
+                buf.extend(limit.to_le_bytes());
+                stream.write_u8(MAPPING_MSG_SET_ACTION_LIMIT).await.unwrap();
+                stream.write_u32_le(buf.len() as u32).await.unwrap();
+                stream.write_all(&buf).await.unwrap();
+                write_lp_string_owh(&mut stream, &pid.0).await.unwrap();
+                stream
+                    .write_u64_le(time.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64)
+                    .await
+                    .unwrap();
+            }
             MapAction::PlayerCamCursor(cam_cursor) => {
                 if buf.initialized() {
                     r = stream.write_all(&buf.get().unwrap()).await;
@@ -247,6 +259,15 @@ impl Player {
         }
     }
 
+    pub async fn write_pid_and_timestamp(&self, pid: &PlayerID, time: SystemTime) {
+        let mut stream = self.stream_w.write().await;
+        write_lp_string_owh(&mut stream, &pid.0).await.unwrap();
+        stream
+            .write_u64_le(time.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64)
+            .await
+            .unwrap();
+    }
+
     pub async fn read_room_msg(&mut self) -> Result<RoomMsg, StreamErr> {
         let mut _stream = self.stream_r.write().await;
         let mut stream = _stream.deref_mut();
@@ -256,10 +277,24 @@ impl Player {
                 // Room creation
                 let password = read_lp_string_owh(&mut stream).await?;
                 let action_rate_limit = stream.read_u32_le().await?;
+                let map_size: [u8; 3] = [
+                    stream.read_u8().await?,
+                    stream.read_u8().await?,
+                    stream.read_u8().await?,
+                ];
+                let map_base: u8 = stream.read_u8().await?;
+                let base_car: u8 = stream.read_u8().await?;
+                let rules_flags: u8 = stream.read_u8().await? & (0xFF ^ 3); // clear last 2 bits, disallow custom items and sweep all
+                let item_max_size: u32 = stream.read_u32_le().await?;
                 // Ok(format!("Room creation: password: {}, action_rate_limit: {}", password, action_rate_limit))
                 Ok(RoomMsg::Create(RoomCreationDeets {
                     password,
                     action_rate_limit,
+                    map_size,
+                    map_base,
+                    base_car,
+                    rules_flags,
+                    item_max_size,
                 }))
             }
             2 => {
@@ -369,6 +404,14 @@ impl Player {
                 stream.read_exact(&mut buf).await?;
                 Ok(MapAction::VehiclePos(PlayerVehiclePos::decode(&buf)?))
             }
+            MAPPING_MSG_SET_ACTION_LIMIT => {
+                // set action limit
+                let len = stream.read_u32_le().await?;
+                let mut buf = vec![0u8; len as usize];
+                stream.read_exact(&mut buf).await?;
+                let limit = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+                Ok(MapAction::Admin_SetActionLimit(limit))
+            }
             _ => Err(StreamErr::InvalidData(format!(
                 "Unknown message type: {}",
                 msg_ty
@@ -411,8 +454,7 @@ pub struct Room {
     // Define room details here
     pub id: u64,
     pub id_str: String,
-    pub password: String,
-    pub action_rate_limit: u32,
+    pub deets: RoomCreationDeets,
     pub players: RwLock<Vec<Arc<Player>>>,
     pub owner: RwLock<Arc<Player>>,
     pub mods: RwLock<Vec<Arc<Player>>>,
@@ -428,8 +470,7 @@ impl Room {
         let room = Room {
             id,
             id_str,
-            password: deets.password,
-            action_rate_limit: deets.action_rate_limit,
+            deets,
             players: vec![player_arc.clone()].into(),
             owner: player_arc.clone().into(),
             mods: vec![].into(),
@@ -454,15 +495,18 @@ impl Room {
     }
 
     pub async fn run(&self) {
-        // check if we have no players every 10ms. If we have no players for 10 minutes, close the room.
+        // check if we have no players every 10ms. If we have no players for stale_minutes (20 minutes), close the room.
         let mut no_players = 0;
+        let wait_ms = 10;
+        let stale_minutes = 20;
         loop {
             let players = self.players.read().await;
             if players.len() == 0 {
-                no_players += 1;
-                if no_players > 60000 {
+                no_players += wait_ms;
+                if no_players > stale_minutes * 60 * 1000 {
                     log::info!(
-                        "Room has no players for 10 minutes, closing room: {:?}",
+                        "Room has no players for {} minutes, closing room: {:?}",
+                        stale_minutes,
                         self.id_str
                     );
                     let _ = self.has_expired.set(());
@@ -472,7 +516,7 @@ impl Room {
                 no_players = 0;
             }
             drop(players);
-            time::sleep(Duration::from_millis(10)).await;
+            time::sleep(Duration::from_millis(wait_ms)).await;
         }
     }
 
@@ -482,7 +526,7 @@ impl Room {
         player: Player,
     ) -> Arc<Player> {
         // Add player to room
-        if self.password != deets.password {
+        if self.deets.password != deets.password {
             log::warn!("Invalid password for room: {}", deets.room_id);
             player.shutdown_err("invalid password").await;
             return player.into();
@@ -508,7 +552,14 @@ impl Room {
     pub async fn send_player_room_details(&self, player: &Player) {
         let mut stream = player.stream_w.write().await;
         let _ = write_lp_string_owh(&mut stream, &self.id_str).await;
-        let _ = stream.write_u32_le(self.action_rate_limit).await;
+        let _ = stream.write_u32_le(self.deets.action_rate_limit).await;
+        let _ = stream.write_u8(self.deets.map_size[0]).await;
+        let _ = stream.write_u8(self.deets.map_size[1]).await;
+        let _ = stream.write_u8(self.deets.map_size[2]).await;
+        let _ = stream.write_u8(self.deets.map_base).await;
+        let _ = stream.write_u8(self.deets.base_car).await;
+        let _ = stream.write_u8(self.deets.rules_flags).await;
+        let _ = stream.write_u32_le(self.deets.item_max_size).await;
     }
 
     pub async fn player_left(&self, p: &Player) {
@@ -571,6 +622,31 @@ impl RoomManager {
             player.get_name(),
             player.get_pid()
         );
+        let mut rx = player.stream_r.write().await;
+        let mut ver_buf = [0u8; 4];
+        match rx.peek(&mut ver_buf).await {
+            Err(e) => {
+                log::error!("Error reading room message: {:?}", e);
+                player.shutdown_err("error reading room message").await;
+                return;
+            }
+            Ok(_) => {
+                // version flag 0xFF and version number with high bit set as flag.
+                if ver_buf[0] != 0xFF || ver_buf[1] != 0x03 && ver_buf[2] != 0x80 {
+                    log::warn!("\\$f40Invalid version bytes: 0x {:x} {:x} {:x}", ver_buf[0], ver_buf[1], ver_buf[2]);
+                    write_lp_string_owh(&mut *player.stream_w.write().await, "\\$s\\$f84 Invalid version: please update.\n").await.unwrap();
+                    player.shutdown_err("invalid version byte").await;
+                    return;
+                }
+            }
+        }
+
+        // Consume version byte flag
+        let _ = rx.read_u8().await.unwrap();
+        // Consume version number
+        let _ = rx.read_u16().await.unwrap();
+        drop(rx);
+
         // read commands from player.stream
         match player.read_room_msg().await {
             Ok(msg) => {
