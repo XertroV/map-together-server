@@ -3,6 +3,14 @@ name = "map-together-server"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "map-together-server"
+path = "src/main.rs"
+
+[[bin]]
+name = "client-bot"
+path = "src/client_bot.rs"
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]

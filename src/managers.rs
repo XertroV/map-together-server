@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::error::Error;
+use std::fmt::Display;
 use futures::stream;
 use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -20,10 +22,13 @@ use crate::msgs::{
 };
 use crate::mt_codec::{MTDecode, MTEncode};
 use crate::player_loop::run_player_loop;
-use crate::{check_token, ServerOpts, TokenResp};
+use crate::op_auth::{check_token, TokenResp};
+use crate::ServerOpts;
 
 pub type ActionDesc = (MapAction, PlayerID, SystemTime, OnceCell<Vec<u8>>);
 pub type ActionDescArc = Arc<ActionDesc>;
+
+pub const CURR_VERSION_BYTES: [u8; 3] = [0xFF as u8, 0x03, 0x80];
 
 #[derive(Debug, Default)]
 struct PlayerSync {
@@ -867,7 +872,7 @@ impl InitializationManager {
             log::error!("Error reading token: {:?}", e);
             let _ = stream.write_all(b"ERR").await;
             let _ = write_lp_string(&mut stream, "malformed token").await;
-            stream.shutdown().await.unwrap();
+            let _ = stream.shutdown().await;
             return;
         }
 
@@ -971,6 +976,18 @@ pub enum StreamErr {
     Utf8(std::string::FromUtf8Error),
     InvalidData(String),
 }
+
+impl Display for StreamErr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StreamErr::Io(e) => write!(f, "IO Error: {}", e),
+            StreamErr::Utf8(e) => write!(f, "UTF8 Error: {}", e),
+            StreamErr::InvalidData(e) => write!(f, "Invalid Data: {}", e),
+        }
+    }
+}
+
+impl std::error::Error for StreamErr {}
 
 impl From<io::Error> for StreamErr {
     fn from(e: io::Error) -> Self {

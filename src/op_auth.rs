@@ -55,9 +55,9 @@ pub async fn check_token(token: &str, plugin_id: i32) -> Option<TokenResp> {
     {
         if token == "test_token" {
             return Some(TokenResp {
-                account_id: "test_account_id".to_string(),
-                display_name: "test_display_name".to_string(),
-                token_time: 0,
+                account_id: "0a2d1bc0-4aaa-4374-b2db-3d561bdab1c9".to_string(),
+                display_name: "XertroV".to_string(),
+                token_time: 1234,
             });
         }
     }
