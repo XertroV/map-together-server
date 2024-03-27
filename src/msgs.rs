@@ -1,4 +1,7 @@
+extern crate rand;
+
 use serde::{Deserialize, Serialize};
+use rand::{distributions::{Distribution, Standard}, Rng};
 
 use crate::{mt_codec::{MTDecode, MTEncode}, read_lp_string, slice_to_lp_string, write_lp_string_to_buf, StreamErr};
 
@@ -122,12 +125,27 @@ pub fn str_to_room_id(s: &str) -> Option<u64> {
 
 
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PlayerVehiclePos {
     pub mat: [[f32; 3]; 4],
     pub vel: [f32; 3],
 }
 
+impl Distribution<PlayerVehiclePos> for Standard {
+    fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> PlayerVehiclePos {
+        let mut mat = [[0.0; 3]; 4];
+        for i in 0..4 {
+            for j in 0..3 {
+                mat[i][j] = rng.gen();
+            }
+        }
+        let mut vel = [0.0; 3];
+        for i in 0..3 {
+            vel[i] = rng.gen();
+        }
+        PlayerVehiclePos { mat, vel }
+    }
+}
 
 impl MTEncode for PlayerVehiclePos {
     fn encode(&self) -> Vec<u8> {
@@ -166,11 +184,25 @@ impl MTDecode for PlayerVehiclePos {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PlayerCamCursor {
     pub cam_matrix: [[f32; 3]; 4],
     pub target: (f32, f32, f32),
     pub cursor: Cursor,
+}
+
+impl Distribution<PlayerCamCursor> for Standard {
+    fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> PlayerCamCursor {
+        let mut cam_matrix = [[0.0; 3]; 4];
+        for i in 0..4 {
+            for j in 0..3 {
+                cam_matrix[i][j] = rng.gen();
+            }
+        }
+        let target = (rng.gen(), rng.gen(), rng.gen());
+        let cursor = rng.gen();
+        PlayerCamCursor { cam_matrix, target, cursor }
+    }
 }
 
 impl MTEncode for PlayerCamCursor {
@@ -213,13 +245,41 @@ impl MTDecode for PlayerCamCursor {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Cursor {
     pub edit_mode: u8,
     pub place_mode: u8,
     pub cur_obj: String,
     pub coords: [u32; 3],
     pub pos: [f32; 3],
+}
+
+
+fn generate_rand_string(len: usize) -> String {
+    const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut rng = rand::thread_rng();
+    let one_char = || CHARSET[rng.gen_range(0..CHARSET.len())] as char;
+    std::iter::repeat_with(one_char).take(len).collect()
+}
+
+impl Distribution<Cursor> for Standard {
+    fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> Cursor {
+        let mut coords = [0; 3];
+        for i in 0..3 {
+            coords[i] = rng.gen();
+        }
+        let mut pos = [0.0; 3];
+        for i in 0..3 {
+            pos[i] = rng.gen();
+        }
+        Cursor {
+            edit_mode: rng.gen(),
+            place_mode: rng.gen(),
+            cur_obj: generate_rand_string(rng.gen_range(8..20)),
+            coords,
+            pos,
+        }
+    }
 }
 
 impl MTEncode for Cursor {

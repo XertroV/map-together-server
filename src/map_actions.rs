@@ -1,8 +1,16 @@
-use crate::{mt_codec::{MTDecode, MTEncode}, read_lp_string, slice_to_lp_string, write_lp_string_to_buf, StreamErr};
-use crate::msgs::*;
+use std::{
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use crate::{msgs::*, write_pid_and_timestamp, write_pid_and_timestamp_to_buf};
+use crate::{
+    mt_codec::{MTDecode, MTEncode},
+    read_lp_string, slice_to_lp_string, write_lp_string_to_buf, Player, StreamErr,
+};
 
 /// WSID
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PlayerID(pub String);
 
 impl From<String> for PlayerID {
@@ -21,7 +29,6 @@ impl From<&String> for PlayerID {
     }
 }
 
-
 // should match client and make sure these are used instead of inline numbers
 pub const MAPPING_MSG_PLACE: u8 = 1;
 pub const MAPPING_MSG_DELETE: u8 = 2;
@@ -39,9 +46,11 @@ pub const MAPPING_MSG_CHANGE_ADMIN: u8 = 13;
 pub const MAPPING_MSG_PLAYER_CAMCURSOR: u8 = 14;
 pub const MAPPING_MSG_PLAYER_VEHICLEPOS: u8 = 15;
 pub const MAPPING_MSG_SET_ACTION_LIMIT: u8 = 16;
+pub const MAPPING_MSG_SET_VARIABLE: u8 = 17;
+pub const MAPPING_MSG_SET_ROOM_PLAYER_LIMIT: u8 = 18;
 
-
-#[derive(Debug)]
+#[allow(non_camel_case_types)]
+#[derive(Debug, Clone)]
 pub enum MapAction {
     Place(MacroblockSpec),
     Delete(MacroblockSpec),
@@ -49,8 +58,8 @@ pub enum MapAction {
     SetSkin(SetSkinSpec),
     SetWaypoint(WaypointSpec),
     SetMapName(String),
-    PlayerJoin {name: String, account_id: String},
-    PlayerLeave {name: String, account_id: String},
+    PlayerJoin { name: String, account_id: String },
+    PlayerLeave { name: String, account_id: String },
     Admin_PromoteMod(PlayerID),
     Admin_DemoteMod(PlayerID),
     Admin_KickPlayer(PlayerID),
@@ -59,12 +68,16 @@ pub enum MapAction {
     PlayerCamCursor(PlayerCamCursor),
     VehiclePos(PlayerVehiclePos),
     Admin_SetActionLimit(u32),
+    Admin_SetVariable(String, String),
+    Admin_SetRoomPlayerLimit(u32),
 }
-
 
 impl MapAction {
     pub fn is_ephemeral(&self) -> bool {
-        matches!(self, MapAction::PlayerCamCursor(_) | MapAction::VehiclePos(_))
+        matches!(
+            self,
+            MapAction::PlayerCamCursor(_) | MapAction::VehiclePos(_)
+        )
     }
 
     pub fn get_type(&self) -> &'static str {
@@ -75,8 +88,8 @@ impl MapAction {
             MapAction::SetSkin(_) => "SetSkin",
             MapAction::SetWaypoint(_) => "SetWaypoint",
             MapAction::SetMapName(_) => "SetMapName",
-            MapAction::PlayerJoin {..} => "PlayerJoin",
-            MapAction::PlayerLeave {..} => "PlayerLeave",
+            MapAction::PlayerJoin { .. } => "PlayerJoin",
+            MapAction::PlayerLeave { .. } => "PlayerLeave",
             MapAction::Admin_PromoteMod(_) => "Admin_PromoteMod",
             MapAction::Admin_DemoteMod(_) => "Admin_DemoteMod",
             MapAction::Admin_KickPlayer(_) => "Admin_KickPlayer",
@@ -85,12 +98,13 @@ impl MapAction {
             MapAction::PlayerCamCursor(_) => "PlayerCamCursor",
             MapAction::VehiclePos(_) => "VehiclePos",
             MapAction::Admin_SetActionLimit(_) => "Admin_SetActionLimit",
+            MapAction::Admin_SetVariable(..) => "Admin_SetVariable",
+            MapAction::Admin_SetRoomPlayerLimit(_) => "Admin_SetRoomPlayerLimit",
         }
     }
 }
 
-
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MacroblockSpec {
     pub blocks: Vec<BlockSpec>,
     pub items: Vec<ItemSpec>,
@@ -109,7 +123,9 @@ impl MTDecode for MacroblockSpec {
 
         // blocks
         if &buf[cur..(cur + 4)] != MAGIC_BLOCKS {
-            return Err(StreamErr::InvalidData("expected magic bytes for blocks".to_string()));
+            return Err(StreamErr::InvalidData(
+                "expected magic bytes for blocks".to_string(),
+            ));
         }
         cur += 4;
 
@@ -127,7 +143,9 @@ impl MTDecode for MacroblockSpec {
 
         // skins (expect none)
         if &buf[cur..(cur + 4)] != MAGIC_SKINS {
-            return Err(StreamErr::InvalidData("expected magic bytes for items".to_string()));
+            return Err(StreamErr::InvalidData(
+                "expected magic bytes for items".to_string(),
+            ));
         }
         cur += 4;
 
@@ -139,7 +157,9 @@ impl MTDecode for MacroblockSpec {
 
         // items
         if &buf[cur..(cur + 4)] != MAGIC_ITEMS {
-            return Err(StreamErr::InvalidData("expected magic bytes for items".to_string()));
+            return Err(StreamErr::InvalidData(
+                "expected magic bytes for items".to_string(),
+            ));
         }
         cur += 4;
 
@@ -177,7 +197,7 @@ impl MTEncode for MacroblockSpec {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SetSkinSpec {
     fg_skin: String,
     bg_skin: String,
@@ -193,26 +213,32 @@ impl MTDecode for SetSkinSpec {
         log::debug!("fg_skin: {:?}", fg_skin);
         let pos = 2 + fg_skin.len();
         let bg_skin = slice_to_lp_string(&buf[pos..])?;
-        let pos = pos +  2 + bg_skin.len();
+        let pos = pos + 2 + bg_skin.len();
         log::debug!("bg_skin: {:?}", bg_skin);
-        log::debug!("next bytes: {:?}", &buf[pos..(pos+10)]);
+        log::debug!("next bytes: {:?}", &buf[pos..(pos + 10)]);
         let block = if buf[pos] == 0 {
             log::debug!("block is none");
             None
         } else {
-            log::debug!("block is some, {:?}", &buf[pos..pos+10]);
-            Some(BlockSpec::decode(&buf[pos+1..])?)
+            log::debug!("block is some, {:?}", &buf[pos..pos + 10]);
+            Some(BlockSpec::decode(&buf[pos + 1..])?)
         };
         log::debug!("read block, is_some: {:?}", block.is_some());
         let pos = pos + 1 + block.as_ref().map(|b| b.encoded_len).unwrap_or(0);
         let item = if buf[pos] == 0 {
             None
         } else {
-            Some(ItemSpec::decode(&buf[pos+1..])?)
+            Some(ItemSpec::decode(&buf[pos + 1..])?)
         };
         log::debug!("read item, is_some: {:?}", item.is_some());
         let pos = pos + 1 + item.as_ref().map(|i| i.decoded_len).unwrap_or(0);
-        Ok(SetSkinSpec { fg_skin, bg_skin, block, item, enc_size: pos })
+        Ok(SetSkinSpec {
+            fg_skin,
+            bg_skin,
+            block,
+            item,
+            enc_size: pos,
+        })
     }
 }
 
@@ -236,7 +262,6 @@ impl MTEncode for SetSkinSpec {
         buf
     }
 }
-
 
 #[derive(Debug)]
 pub struct SkinSpec {
@@ -264,9 +289,21 @@ impl MTEncode for SkinSpec {
 
 #[derive(Debug)]
 pub enum SkinApplyType {
-    NormBlock { coord: [u32; 3], dir: u8, ident: String },
-    GhostBlock { coord: [u32; 3], dir: u8, ident: String },
-    FreeBlock { pos: [f32; 3], pyr: [f32; 3], ident: String },
+    NormBlock {
+        coord: [u32; 3],
+        dir: u8,
+        ident: String,
+    },
+    GhostBlock {
+        coord: [u32; 3],
+        dir: u8,
+        ident: String,
+    },
+    FreeBlock {
+        pos: [f32; 3],
+        pyr: [f32; 3],
+        ident: String,
+    },
 }
 
 impl MTDecode for SkinApplyType {
@@ -316,7 +353,11 @@ impl MTDecode for SkinApplyType {
                 let ident = slice_to_lp_string(&buf[cur..])?;
                 SkinApplyType::FreeBlock { pos, pyr, ident }
             }
-            _ => return Err(StreamErr::InvalidData("invalid skin apply type".to_string())),
+            _ => {
+                return Err(StreamErr::InvalidData(
+                    "invalid skin apply type".to_string(),
+                ))
+            }
         };
         Ok(apply_type)
     }
@@ -410,7 +451,7 @@ class ItemSpec : NetworkSerializable {
 }
 */
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BlockSpec {
     encoded_len: usize,
     name: String,
@@ -471,7 +512,8 @@ impl MTDecode for BlockSpec {
         cur += 1;
         let mobil_ix = u32::from_le_bytes([buf[cur], buf[cur + 1], buf[cur + 2], buf[cur + 3]]);
         cur += 4;
-        let mobil_variant = u32::from_le_bytes([buf[cur], buf[cur + 1], buf[cur + 2], buf[cur + 3]]);
+        let mobil_variant =
+            u32::from_le_bytes([buf[cur], buf[cur + 1], buf[cur + 2], buf[cur + 3]]);
         cur += 4;
         let variant = u32::from_le_bytes([buf[cur], buf[cur + 1], buf[cur + 2], buf[cur + 3]]);
         cur += 4;
@@ -481,7 +523,7 @@ impl MTDecode for BlockSpec {
         let waypoint = if buf[cur] == 0 {
             None
         } else {
-            Some(WaypointSpec::decode(&buf[cur+1..])?)
+            Some(WaypointSpec::decode(&buf[cur + 1..])?)
         };
         cur += 1 + waypoint.as_ref().map(|w| w.decoded_len).unwrap_or(0);
         let decoded_len = cur;
@@ -505,7 +547,6 @@ impl MTDecode for BlockSpec {
         })
     }
 }
-
 
 impl MTEncode for BlockSpec {
     fn encode(&self) -> Vec<u8> {
@@ -542,7 +583,6 @@ impl MTEncode for BlockSpec {
     }
 }
 
-
 #[derive(Debug)]
 pub struct SetWaypointSpec {
     waypoint: WaypointSpec,
@@ -550,7 +590,6 @@ pub struct SetWaypointSpec {
     item: Option<ItemSpec>,
     enc_size: usize,
 }
-
 
 impl MTDecode for SetWaypointSpec {
     fn decode(buf: &[u8]) -> Result<Self, StreamErr> {
@@ -568,7 +607,12 @@ impl MTDecode for SetWaypointSpec {
             Some(ItemSpec::decode(&buf[cur..])?)
         };
         cur += 1 + item.as_ref().map(|i| i.decoded_len).unwrap_or(0);
-        Ok(SetWaypointSpec { waypoint, block, item, enc_size: cur })
+        Ok(SetWaypointSpec {
+            waypoint,
+            block,
+            item,
+            enc_size: cur,
+        })
     }
 }
 
@@ -592,7 +636,7 @@ impl MTEncode for SetWaypointSpec {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct WaypointSpec {
     decoded_len: usize,
     tag: String,
@@ -606,7 +650,11 @@ impl MTDecode for WaypointSpec {
         cur += 2 + tag.len();
         let order = u32::from_le_bytes([buf[cur], buf[cur + 1], buf[cur + 2], buf[cur + 3]]);
         cur += 4;
-        Ok(WaypointSpec { decoded_len: cur, tag, order })
+        Ok(WaypointSpec {
+            decoded_len: cur,
+            tag,
+            order,
+        })
     }
 }
 
@@ -620,7 +668,7 @@ impl MTEncode for WaypointSpec {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ItemSpec {
     decoded_len: usize,
     name: String,
@@ -702,14 +750,16 @@ impl MTDecode for ItemSpec {
         cur += 1;
         let variant_ix = u16::from_le_bytes([buf[cur], buf[cur + 1]]);
         cur += 2;
-        let associated_block_ix = u32::from_le_bytes([buf[cur], buf[cur + 1], buf[cur + 2], buf[cur + 3]]);
+        let associated_block_ix =
+            u32::from_le_bytes([buf[cur], buf[cur + 1], buf[cur + 2], buf[cur + 3]]);
         cur += 4;
-        let item_group_on_block = u32::from_le_bytes([buf[cur], buf[cur + 1], buf[cur + 2], buf[cur + 3]]);
+        let item_group_on_block =
+            u32::from_le_bytes([buf[cur], buf[cur + 1], buf[cur + 2], buf[cur + 3]]);
         cur += 4;
         let waypoint = if buf[cur] == 0 {
             None
         } else {
-            Some(WaypointSpec::decode(&buf[cur+1..])?)
+            Some(WaypointSpec::decode(&buf[cur + 1..])?)
         };
         cur += 1 + waypoint.as_ref().map(|w| w.decoded_len).unwrap_or(0);
         let decoded_len = cur;
@@ -782,5 +832,25 @@ impl MTEncode for ItemSpec {
             buf.push(0);
         }
         buf
+    }
+}
+
+pub async fn dump_macroblocks(action: MapAction, player: Arc<Player>) {
+    match action {
+        MapAction::Place(spec) => {
+            let now = SystemTime::now();
+            let ts = now.duration_since(UNIX_EPOCH).unwrap().as_secs();
+            let mut buf = spec.encode();
+            write_pid_and_timestamp_to_buf(&mut buf, player.get_pid(), now);
+            let fname = format!(
+                "./mb-{}-b{}-i{}.mb_spec",
+                ts,
+                spec.blocks.len(),
+                spec.items.len()
+            );
+            tokio::fs::write(&fname, buf).await;
+            log::info!("wrote mb spec: {}", fname);
+        }
+        _ => {}
     }
 }
