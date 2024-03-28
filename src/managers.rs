@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::map_actions::{
-    MacroblockSpec, MapAction, PlayerID, SetSkinSpec, SkinSpec, WaypointSpec, MAPPING_MSG_BAN_PLAYER, MAPPING_MSG_CHANGE_ADMIN, MAPPING_MSG_DELETE, MAPPING_MSG_DEMOTE_MOD, MAPPING_MSG_KICK_PLAYER, MAPPING_MSG_PLACE, MAPPING_MSG_PLAYER_CAMCURSOR, MAPPING_MSG_PLAYER_JOIN, MAPPING_MSG_PLAYER_LEAVE, MAPPING_MSG_PLAYER_VEHICLEPOS, MAPPING_MSG_PROMOTE_MOD, MAPPING_MSG_RESYNC, MAPPING_MSG_SET_ACTION_LIMIT, MAPPING_MSG_SET_MAPNAME, MAPPING_MSG_SET_ROOM_PLAYER_LIMIT, MAPPING_MSG_SET_SKIN, MAPPING_MSG_SET_VARIABLE, MAPPING_MSG_SET_WAYPOINT
+    MacroblockSpec, MapAction, PlayerID, SetSkinSpec, SkinSpec, WaypointSpec, MAPPING_MSG_ALERT_STATUS_TO_ALL, MAPPING_MSG_BAN_PLAYER, MAPPING_MSG_CHANGE_ADMIN, MAPPING_MSG_CHAT_MSG, MAPPING_MSG_DELETE, MAPPING_MSG_DEMOTE_MOD, MAPPING_MSG_KICK_PLAYER, MAPPING_MSG_PLACE, MAPPING_MSG_PLAYER_CAMCURSOR, MAPPING_MSG_PLAYER_JOIN, MAPPING_MSG_PLAYER_LEAVE, MAPPING_MSG_PLAYER_VEHICLEPOS, MAPPING_MSG_PROMOTE_MOD, MAPPING_MSG_RESYNC, MAPPING_MSG_SET_ACTION_LIMIT, MAPPING_MSG_SET_MAPNAME, MAPPING_MSG_SET_ROOM_PLAYER_LIMIT, MAPPING_MSG_SET_SKIN, MAPPING_MSG_SET_VARIABLE, MAPPING_MSG_SET_WAYPOINT
 };
 use crate::msgs::{
     generate_room_id, room_id_to_str, str_to_room_id, PlayerCamCursor, PlayerVehiclePos, RoomConnectionDeets, RoomCreationDeets, RoomMsg
@@ -28,7 +28,7 @@ use crate::ServerOpts;
 pub type ActionDesc = (MapAction, PlayerID, SystemTime, OnceCell<Vec<u8>>);
 pub type ActionDescArc = Arc<ActionDesc>;
 
-pub const CURR_VERSION_BYTES: [u8; 3] = [0xFF as u8, 0x03, 0x80];
+pub const CURR_VERSION_BYTES: [u8; 3] = [0xFF as u8, 0x04, 0x80];
 
 #[derive(Debug, Default)]
 struct PlayerSync {
@@ -261,8 +261,9 @@ impl Player {
             MapAction::Admin_KickPlayer(t_pid) => write_str_msg_full(stream, MAPPING_MSG_KICK_PLAYER, &t_pid.0, pid, time).await?,
             MapAction::Admin_BanPlayer(t_pid) => write_str_msg_full(stream, MAPPING_MSG_BAN_PLAYER, &t_pid.0, pid, time).await?,
             MapAction::Admin_ChangeAdmin(t_pid) => write_str_msg_full(stream, MAPPING_MSG_CHANGE_ADMIN, &t_pid.0, pid, time).await?,
-            MapAction::Admin_SetRoomPlayerLimit(limit) => write_u32_msg_full(stream, MAPPING_MSG_SET_ROOM_PLAYER_LIMIT, *limit, pid, time).await?,
+            MapAction::Admin_SetRoomPlayerLimit(limit) => write_u16_msg_full(stream, MAPPING_MSG_SET_ROOM_PLAYER_LIMIT, *limit, pid, time).await?,
             MapAction::Admin_SetActionLimit(limit) => write_u32_msg_full(stream, MAPPING_MSG_SET_ACTION_LIMIT, *limit, pid, time).await?,
+            MapAction::Admin_AlertStatusToAll(msg) => write_str_msg_full(stream, MAPPING_MSG_ALERT_STATUS_TO_ALL, &msg, pid, time).await?,
             MapAction::Admin_SetVariable(k, v) => {
                 let mut buf = vec![];
                 write_lp_string_to_buf(&mut buf, k);
@@ -276,6 +277,7 @@ impl Player {
                     .await
                     .unwrap();
             }
+
             MapAction::PlayerCamCursor(cam_cursor) => {
                 if buf.initialized() {
                     stream.write_all(&buf.get().unwrap()).await?;
@@ -316,7 +318,15 @@ impl Player {
                     buf.get_or_init(|| async move { new_buf }).await;
                 }
             },
-
+            MapAction::ChatMsg(ty, msg) => {
+                let mut buf = vec![];
+                buf.push(*ty);
+                write_lp_string_to_buf(&mut buf, msg);
+                stream.write_u8(MAPPING_MSG_CHAT_MSG).await?;
+                stream.write_u32_le(buf.len() as u32).await?;
+                stream.write_all(&buf).await?;
+                write_pid_and_timestamp(stream, pid, time).await?;
+            }
         }
         Ok(())
     }
@@ -348,6 +358,7 @@ impl Player {
                 let base_car: u8 = stream.read_u8().await?;
                 let rules_flags: u8 = stream.read_u8().await? & (0xFF ^ 3); // clear last 2 bits, disallow custom items and sweep all
                 let item_max_size: u32 = stream.read_u32_le().await?;
+                let player_limit: u16 = stream.read_u16_le().await?;
                 // Ok(format!("Room creation: password: {}, action_rate_limit: {}", password, action_rate_limit))
                 Ok(RoomMsg::Create(RoomCreationDeets {
                     password,
@@ -357,6 +368,7 @@ impl Player {
                     base_car,
                     rules_flags,
                     item_max_size,
+                    player_limit
                 }))
             }
             2 => {
@@ -366,7 +378,7 @@ impl Player {
                 // Ok(format!("Room join: room_id: {}, password: {}", room_id, password))
                 Ok(RoomMsg::Join(RoomConnectionDeets { room_id, password }))
             }
-            _ => Ok(RoomMsg::Unk(msg_ty, format!("Unknown message type"))),
+            _ => Ok(RoomMsg::Unk(msg_ty, format!("Unknown room message type"))),
         }
     }
 
@@ -476,8 +488,17 @@ impl Player {
                 }
                 let mut buf = vec![0u8; len as usize];
                 stream.read_exact(&mut buf).await?;
-                let limit = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+                let limit = u16::from_le_bytes([buf[0], buf[1]]);
                 Ok(MapAction::Admin_SetRoomPlayerLimit(limit))
+            }
+            MAPPING_MSG_CHAT_MSG => {
+                // chat message
+                let len = read_checked_msg_u32_len(stream).await?;
+                let mut buf = vec![0u8; len as usize];
+                stream.read_exact(&mut buf).await?;
+                let ty = buf[0];
+                let msg = slice_to_lp_string(&buf[1..])?;
+                Ok(MapAction::ChatMsg(ty, msg))
             }
             _ => Err(StreamErr::InvalidData(format!(
                 "Unknown message type: {}",
@@ -556,16 +577,30 @@ pub async fn write_u32_msg_full(
     Ok(())
 }
 
+pub async fn write_u16_msg_full(
+    stream: &mut OwnedWriteHalf,
+    msg_ty: u8,
+    val: u16,
+    pid: &PlayerID,
+    time: SystemTime,
+) -> Result<(), StreamErr> {
+    stream.write_u8(msg_ty).await?;
+    stream.write_u32_le(2).await?;
+    stream.write_u16_le(val).await?;
+    write_pid_and_timestamp(stream, pid, time).await?;
+    Ok(())
+}
+
 
 pub async fn write_str_msg_full(
     stream: &mut OwnedWriteHalf,
     msg_ty: u8,
-    target_pid: &str,
+    content: &str,
     my_pid: &PlayerID,
     time: SystemTime,
 ) -> Result<(), StreamErr> {
     let mut new_buf = vec![];
-    write_lp_string_to_buf(&mut new_buf, target_pid);
+    write_lp_string_to_buf(&mut new_buf, content);
     stream.write_u8(msg_ty).await?;
     stream.write_u32_le(new_buf.len() as u32).await?;
     stream.write_all(&new_buf).await?;
@@ -610,6 +645,7 @@ pub struct Room {
     pub mods: RwLock<Vec<Arc<Player>>>,
     pub actions: RwLock<Vec<Arc<(MapAction, PlayerID, SystemTime, OnceCell<Vec<u8>>)>>>,
     pub has_expired: OnceCell<()>,
+    pub player_limit: RwLock<u16>,
 }
 
 impl Room {
@@ -617,6 +653,7 @@ impl Room {
         let id = generate_room_id();
         let id_str = room_id_to_str(id);
         let player_arc: Arc<_> = player.into();
+        let player_limit = deets.player_limit.into();
         let room = Room {
             id,
             id_str,
@@ -627,6 +664,7 @@ impl Room {
             mods: vec![].into(),
             actions: vec![].into(),
             has_expired: OnceCell::new(),
+            player_limit
         };
         let room = Arc::new(room);
         let room_clone = room.clone();
@@ -677,6 +715,18 @@ impl Room {
     ) -> Arc<Player> {
         // Add player to room
         log::debug!("[locking] Adding player to room: {:?}", player.get_name());
+        let ps = self.players.write().await;
+        let mut rem = vec![];
+        for p in ps.iter() {
+            if p.get_pid() == player.get_pid() {
+                rem.push(p.clone());
+            }
+        }
+        drop(ps);
+        for p in rem {
+            p.shutdown_err("client reconnected").await;
+            self.player_left(&p).await;
+        }
         self.add_player_joined_msg(&player).await;
         self.players.write().await.push(player.clone());
         player
@@ -707,6 +757,7 @@ impl Room {
         let _ = stream.write_u8(self.deets.base_car).await;
         let _ = stream.write_u8(self.deets.rules_flags).await;
         let _ = stream.write_u32_le(self.deets.item_max_size).await;
+        let _ = stream.write_u16_le(self.deets.player_limit).await;
     }
 
     pub async fn player_left(&self, p: &Player) {
@@ -774,7 +825,7 @@ impl RoomManager {
             player.get_pid()
         );
         let mut rx: tokio::sync::RwLockWriteGuard<'_, OwnedReadHalf> = player.stream_r.write().await;
-        let mut ver_buf = [0u8; 4];
+        let mut ver_buf = [0u8; 3];
         match rx.peek(&mut ver_buf).await {
             Err(e) => {
                 log::error!("Error reading room message: {:?}", e);
@@ -783,7 +834,7 @@ impl RoomManager {
             }
             Ok(_) => {
                 // version flag 0xFF and version number with high bit set as flag.
-                if ver_buf[0] != 0xFF || ver_buf[1] != 0x03 && ver_buf[2] != 0x80 {
+                if ver_buf != CURR_VERSION_BYTES {
                     let err_msg = format!("\\$f40Invalid version bytes: 0x {:x} {:x} {:x}", ver_buf[0], ver_buf[1], ver_buf[2]);
                     log::warn!("{}", err_msg);
                     #[cfg(test)]
@@ -805,6 +856,7 @@ impl RoomManager {
         match player.read_room_msg().await {
             Ok(msg) => {
                 log::debug!("RoomMsg: {:?}", msg);
+                player.stream_w.write().await.write(b"OK_").await.expect("to write OK_");
                 match msg {
                     RoomMsg::Create(deets) => {
                         log::debug!("RoomCreationDeets: {:?}", deets);
@@ -834,12 +886,19 @@ impl RoomManager {
                             return;
                         }
 
+                        if room.players.read().await.len() >= *room.player_limit.read().await as usize {
+                            log::warn!("Room full: {}", deets.room_id);
+                            player.shutdown_err("Room is full").await;
+                            return;
+                        }
+
+                        // player.stream_w.write().await.write(b"OK_").await;
                         let player = Arc::new(player);
+                        room.add_player_via_join(player.clone()).await;
                         run_player_loop(player.clone(), room.clone(), action_rx).await;
-                        room.add_player_via_join(player).await;
                     }
                     RoomMsg::Unk(ty, msg) => {
-                        log::warn!("Unknown message type: {} - {}", ty, msg);
+                        log::warn!("Unknown room message type: {} - {}", ty, msg);
                         player.shutdown_err("unknown message type").await;
                         return;
                     }
@@ -913,6 +972,7 @@ pub async fn read_lp_string(stream: &mut TcpStream) -> Result<String, StreamErr>
     // }
     stream.read_exact(&mut buf).await?;
     let len = u16::from_le_bytes(buf) as usize;
+    check_len_lt_er(len as u16)?;
     // log::info!("Reading string of length: {}", len);
     let mut buf = vec![0u8; len];
     stream.read_exact(&mut buf).await?;
@@ -924,6 +984,7 @@ pub async fn read_lp_string_owh(stream: &mut OwnedReadHalf) -> Result<String, St
     let mut buf = [0u8; 2];
     stream.read_exact(&mut buf).await?;
     let len = u16::from_le_bytes(buf) as usize;
+    check_len_lt_er(len as u16)?;
     let mut buf = vec![0u8; len];
     stream.read_exact(&mut buf).await?;
     Ok(String::from_utf8(buf)?)
@@ -937,6 +998,7 @@ pub fn slice_to_lp_string(buf: &[u8]) -> Result<String, StreamErr> {
         )));
     }
     let len = u16::from_le_bytes([buf[0], buf[1]]) as usize;
+    check_len_lt_er(len as u16)?;
 
     if len > buf.len() - 2 {
         return Err(StreamErr::Io(io::Error::new(
@@ -947,14 +1009,23 @@ pub fn slice_to_lp_string(buf: &[u8]) -> Result<String, StreamErr> {
     Ok(String::from_utf8_lossy(&buf[2..(len + 2)]).into_owned())
 }
 
+pub fn check_len_lt_er(len: u16) -> Result<(), StreamErr> {
+    if len > 10000 {
+        return Err(StreamErr::InvalidData(format!("String too long: {}", len)));
+    }
+    Ok(())
+}
+
 pub async fn write_lp_string(stream: &mut TcpStream, s: &str) -> Result<(), StreamErr> {
     let len = s.len() as u16;
+    check_len_lt_er(len)?;
     stream.write_all(&len.to_le_bytes()).await?;
     stream.write_all(s.as_bytes()).await?;
     Ok(())
 }
 pub async fn write_lp_string_owh(stream: &mut OwnedWriteHalf, s: &str) -> Result<(), StreamErr> {
     let len = s.len() as u16;
+    check_len_lt_er(len)?;
     stream.write_all(&len.to_le_bytes()).await?;
     stream.write_all(s.as_bytes()).await?;
     Ok(())
@@ -962,11 +1033,12 @@ pub async fn write_lp_string_owh(stream: &mut OwnedWriteHalf, s: &str) -> Result
 
 pub fn write_lp_string_to_buf(buf: &mut Vec<u8>, s: &str) {
     let len = s.len() as u16;
-    let buf_pre_len = buf.len();
+    check_len_lt_er(len as u16).expect("string lt b'ER'");
+    // let buf_pre_len = buf.len();
     // log::debug!("Writing string to buf: {} / {:?}", len, s);
     buf.extend_from_slice(&len.to_le_bytes());
     buf.extend_from_slice(s.as_bytes());
-    let buf_post_len = buf.len();
+    // let buf_post_len = buf.len();
     // log::debug!("Wrote string to buf: {:?}", &buf[buf_pre_len..buf_post_len]);
 }
 

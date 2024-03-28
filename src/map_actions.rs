@@ -46,6 +46,8 @@ pub const MAPPING_MSG_PLAYER_VEHICLEPOS: u8 = 15;
 pub const MAPPING_MSG_SET_ACTION_LIMIT: u8 = 16;
 pub const MAPPING_MSG_SET_VARIABLE: u8 = 17;
 pub const MAPPING_MSG_SET_ROOM_PLAYER_LIMIT: u8 = 18;
+pub const MAPPING_MSG_ALERT_STATUS_TO_ALL: u8 = 19;
+pub const MAPPING_MSG_CHAT_MSG: u8 = 20;
 
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone)]
@@ -67,7 +69,9 @@ pub enum MapAction {
     VehiclePos(PlayerVehiclePos),
     Admin_SetActionLimit(u32),
     Admin_SetVariable(String, String),
-    Admin_SetRoomPlayerLimit(u32),
+    Admin_SetRoomPlayerLimit(u16),
+    Admin_AlertStatusToAll(String),
+    ChatMsg(u8, String),
 }
 
 impl MapAction {
@@ -98,6 +102,9 @@ impl MapAction {
             MapAction::Admin_SetActionLimit(_) => "Admin_SetActionLimit",
             MapAction::Admin_SetVariable(..) => "Admin_SetVariable",
             MapAction::Admin_SetRoomPlayerLimit(_) => "Admin_SetRoomPlayerLimit",
+            MapAction::Admin_AlertStatusToAll(_) => "Admin_AlertStatusToAll",
+            MapAction::ChatMsg(_, _) => "ChatMsg",
+
         }
     }
 }

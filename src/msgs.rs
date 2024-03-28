@@ -29,6 +29,7 @@ pub struct RoomCreationDeets {
     // allow custom items?, allow delete?, allow selection cut?
     pub rules_flags: u8,
     pub item_max_size: u32,
+    pub player_limit: u16,
 }
 
 impl RoomCreationDeets {
@@ -78,7 +79,10 @@ impl MTDecode for RoomCreationDeets {
         let rules_flags = buf[idx];
         idx += 1;
         let item_max_size = u32::from_le_bytes([buf[idx], buf[idx + 1], buf[idx + 2], buf[idx + 3]]);
-        Ok(Self { password, action_rate_limit, map_size, map_base, base_car, rules_flags, item_max_size })
+        idx += 4;
+        let player_limit = u16::from_le_bytes([buf[idx], buf[idx + 1]]);
+        idx += 2;
+        Ok(Self { password, action_rate_limit, map_size, map_base, base_car, rules_flags, item_max_size, player_limit })
     }
 }
 

@@ -2,10 +2,12 @@
 name = "map-together-server"
 version = "0.1.0"
 edition = "2021"
+default-run = "map-together-server"
 
 [[bin]]
 name = "map-together-server"
 path = "src/main.rs"
+
 
 [[bin]]
 name = "client-bot"
