@@ -114,17 +114,21 @@ pub async fn run_player_loop(player: Arc<Player>, room: Arc<Room>, mut action_rx
             }
 
             if sync_actions || ephemeral_action.is_some() {
-                let players = room.players.read().await.clone();
+                // let players = room.players.read().await.clone();
 
-                if let Some(action) = action {
-                    log::debug!("[{}] player {:?} action: {:?}, getting lock and pushing", room.id_str, player.get_name(), action.0.get_type());
-                    let mut actions = room.actions.write().await;
-                    actions.push(action.into());
-                    log::debug!("[{}] syncing all players", room.id_str);
-                    for p in players.into_iter() {
-                        p.sync_actions(&actions).await;
-                    }
-                    log::debug!("[{}] done syncing all players with action", room.id_str);
+                // non ephemeral actions
+                if let Some(action) = action.take() {
+                    log::debug!("[{}] player {:?} action: {:?}, pushing to room", room.id_str, player.get_name(), action.0.get_type());
+                    match room.add_action(action).await {
+                        Ok(_) => {}
+                        Err(e) => {
+                            log::error!("[{}] Error pushing action to room: {:?}", room.id_str, e);
+                            player.shutdown_err("error pushing action to room").await;
+                            room.player_left(&player).await;
+                            log::info!("[{}] Player left: {:?}", room.id_str, player.get_name());
+                            break;
+                        }
+                    };
                 }
 
                 if let Some(action) = ephemeral_action {

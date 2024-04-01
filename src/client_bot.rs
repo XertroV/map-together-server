@@ -78,6 +78,10 @@ impl ClientBot {
                 .unwrap();
             write_lp_string(&mut self.stream, "test_pw").await.unwrap();
 
+            let mut buf = [0u8; 3];
+            self.stream.read_exact(&mut buf).await.unwrap();
+            assert_eq!(&buf, b"OK_");
+
             room_id = read_lp_string(&mut self.stream).await.unwrap();
         } else {
             println!("Creating room");
@@ -85,18 +89,20 @@ impl ClientBot {
             write_lp_string(&mut self.stream, "test_pw").await.unwrap();
             println!("Sent room create and pw");
 
-            let deets = [0u8; 14];
+            let mut deets = [0u8; 16];
+            deets[14] = 0xff;
+            deets[15] = 0xff;
             self.stream.write_all(&deets).await.unwrap();
             println!("Sent room creation deets");
 
-            // let mut buf = [0u8; 3];
-            // self.stream.read_exact(&mut buf).await.unwrap();
-            // assert_eq!(&buf, b"OK_");
+            let mut buf = [0u8; 3];
+            self.stream.read_exact(&mut buf).await.unwrap();
+            assert_eq!(&buf, b"OK_");
 
             room_id = read_lp_string(&mut self.stream).await.unwrap();
 
-            // 2 * 4 + 6 * 1 bytes = 14
-            // self.stream.read_exact(&mut [0u8; 14]).await.unwrap();
+            // 2 * 4 + 6 * 1 bytes = 16
+            // self.stream.read_exact(&mut [0u8; 16]).await.unwrap();
         }
         assert_eq!(room_id.len(), 6);
         let init_ty = match join {
@@ -109,9 +115,10 @@ impl ClientBot {
             ROOM_IDS.write().await.push(room_id.clone());
             println!("Added to ROOM_IDS: Room ID: {}", room_id);
         }
-        let mut buf = [0u8; 14];
+        let buf_expected = [0u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff];
+        let mut buf = [0u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff];
         self.stream.read_exact(&mut buf).await?;
-        assert_eq!(buf, [0u8; 14], "we wrote zeros for the room creation deets");
+        assert_eq!(buf, buf_expected, "we wrote buf_expected for the room creation deets");
         Ok(())
     }
 
@@ -148,9 +155,19 @@ impl ClientBot {
                     time::sleep(Duration::from_millis(1)).await;
                 }
                 let x = r.read_u8().await?;
+                // E
+                if x == 69 {
+                    let mut buf = vec![0u8; 2];
+                    r.read_exact(&mut buf).await?;
+                    if buf == [82, 82] { // ERR
+                        let err_msg = read_lp_string_owh(&mut r).await?;
+                        assert!(false, "ERR: {}", err_msg);
+                    }
+                    println!("Bot Recv: {} {:?}", x, buf);
+                }
                 assert!(
                     x == 1 || x == 14 || x == 7 || x == 8,
-                    "only place / cursor / join / leave msgs"
+                    "only place / cursor / join / leave msgs, but got {}", x
                 );
                 let len = r.read_u32_le().await?;
                 assert!(len > 0, "len > 0");
@@ -233,7 +250,9 @@ async fn run_client_bot() {
 
     let bots: Arc<RwLock<Vec<ClientBot>>> = Default::default();
     let shutdowns = Arc::new(RwLock::new(vec![]));
-    for i in 0..200 {
+    let mut last_sent = 0;
+    let mut last_recv = 0;
+    for i in 0..100 {
         let _shutdowns = shutdowns.clone();
         let _bots = bots.clone();
         println!(
@@ -247,13 +266,23 @@ async fn run_client_bot() {
             let bot = bot.run(i > 0).await.unwrap();
             _bots.write().await.push(bot);
         });
+        let curr_bots = (*COUNT_BOTS.read().await).max(1);
         *COUNT_BOTS.write().await += 1;
+        let curr_sent = *COUNT_SENT.read().await;
+        let curr_recv = *COUNT_RECV.read().await;
         println!(
-            "[{} ms] Message Stats: Total Sent: {}, Total Recv: {}",
+            "[{} ms] Message Stats: Total Sent: {} (+{} | +{}/player), Total Recv: {} (+{} | +{}/player | +{}/player^2)",
             since_start(),
-            *COUNT_SENT.read().await,
-            *COUNT_RECV.read().await
+            curr_sent,
+            curr_sent - last_sent,
+            (curr_sent - last_sent) / curr_bots,
+            curr_recv,
+            curr_recv - last_recv,
+            (curr_recv - last_recv) / curr_bots,
+            (curr_recv - last_recv) / curr_bots / curr_bots
         );
+        last_sent = curr_sent;
+        last_recv = curr_recv;
         time::sleep(Duration::from_millis(
             rand::thread_rng().gen_range(900..1100),
         ))

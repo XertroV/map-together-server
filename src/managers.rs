@@ -5,9 +5,10 @@ use futures::stream;
 use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
+use tokio::sync::mpsc::error::SendError;
 use tokio::sync::{Mutex, OnceCell, RwLock};
 use tokio::{select, time};
-use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::sync::mpsc::{self, channel, Receiver, Sender};
 
 use futures::future::{self, Either};
 use std::ops::DerefMut;
@@ -23,7 +24,7 @@ use crate::msgs::{
 use crate::mt_codec::{MTDecode, MTEncode};
 use crate::player_loop::run_player_loop;
 use crate::op_auth::{check_token, TokenResp};
-use crate::ServerOpts;
+use crate::{ServerOpts, XERTROV_WSID};
 
 pub type ActionDesc = (MapAction, PlayerID, SystemTime, OnceCell<Vec<u8>>);
 pub type ActionDescArc = Arc<ActionDesc>;
@@ -88,11 +89,11 @@ impl Player {
             for action in new_actions {
                 match action_tx.try_send(action.clone()) {
                     Ok(_) => {
-                        log::debug!(
-                            "Wrote sync action: {:?} -> player {:?} to queue",
-                            action.0.get_type(),
-                            name
-                        );
+                        // log::debug!(
+                        //     "Wrote sync action: {:?} -> player {:?} to queue",
+                        //     action.0.get_type(),
+                        //     name
+                        // );
                     }
                     Err(e) => {
                         match e {
@@ -101,6 +102,7 @@ impl Player {
                             },
                             mpsc::error::TrySendError::Closed(_) => {
                                 log::error!("Error sending action to player {:?}: {:?} - dropping", name, e);
+                                break;
                             },
                         }
                     }
@@ -498,6 +500,7 @@ impl Player {
                 stream.read_exact(&mut buf).await?;
                 let ty = buf[0];
                 let msg = slice_to_lp_string(&buf[1..])?;
+                log::debug!("Chat from {}: {}", self.get_name(), msg);
                 Ok(MapAction::ChatMsg(ty, msg))
             }
             _ => Err(StreamErr::InvalidData(format!(
@@ -540,7 +543,7 @@ impl Player {
 
 pub async fn read_checked_msg_u32_len(stream: &mut OwnedReadHalf) -> Result<u32, StreamErr> {
     let len = stream.read_u32_le().await?;
-    if len > 1000000 {
+    if len > 5000000 {
         return Err(StreamErr::InvalidData(format!("Message too large: {}", len)));
     }
     Ok(len)
@@ -646,6 +649,9 @@ pub struct Room {
     pub actions: RwLock<Vec<Arc<(MapAction, PlayerID, SystemTime, OnceCell<Vec<u8>>)>>>,
     pub has_expired: OnceCell<()>,
     pub player_limit: RwLock<u16>,
+    // pub room_rx_action: Receiver<ActionDesc>,
+    pub room_tx_action: Sender<ActionDesc>,
+    pub action_bytes_sent: RwLock<u64>,
 }
 
 impl Room {
@@ -654,6 +660,7 @@ impl Room {
         let id_str = room_id_to_str(id);
         let player_arc: Arc<_> = player.into();
         let player_limit = deets.player_limit.into();
+        let (room_tx_action, room_rx_action) = channel(50000);
         let room = Room {
             id,
             id_str,
@@ -664,7 +671,9 @@ impl Room {
             mods: vec![].into(),
             actions: vec![].into(),
             has_expired: OnceCell::new(),
-            player_limit
+            player_limit,
+            room_tx_action,
+            action_bytes_sent: 0.into(),
         };
         let room = Arc::new(room);
         let room_clone = room.clone();
@@ -674,7 +683,7 @@ impl Room {
             player_arc.get_pid()
         );
         tokio::spawn(async move {
-            room_clone.run().await;
+            room_clone.run(room_rx_action, room_clone.clone()).await;
         });
         let room_clone = room.clone();
         room.add_player_joined_msg(&player_arc).await;
@@ -683,7 +692,35 @@ impl Room {
         room
     }
 
-    pub async fn run(&self) {
+    pub async fn add_action(&self, action: ActionDesc) -> Result<(), SendError<ActionDesc>> {
+        self.room_tx_action.send(action).await
+    }
+
+    pub async fn run(&self, mut room_rx_action: Receiver<ActionDesc>, this_room: Arc<Room>) {
+        // action reciever loop
+        tokio::spawn(async move {
+            while !this_room.has_expired.initialized() {
+                let action1 = match room_rx_action.recv().await {
+                    // if we get none, the channel is closed
+                    None => break,
+                    Some(action) => action,
+                };
+                // room_rx_action.poll_recv_many(cx, buffer, limit)
+                let mut new_actions = vec![Arc::new(action1)];
+                // can get error on closed or empty
+                while let Ok(action) = room_rx_action.try_recv() {
+                    new_actions.push(action.into());
+                }
+                this_room.actions.write().await.extend(new_actions.into_iter());
+                // after adding actions, need to sync players
+                let players = this_room.players.read().await;
+                let actions = this_room.actions.read().await;
+                for player in players.iter() {
+                    player.sync_actions(&actions).await;
+                }
+            }
+        });
+
         // check if we have no players every 10ms. If we have no players for stale_minutes (20 minutes), close the room.
         let mut no_players = 0;
         let wait_ms = 10;
@@ -715,26 +752,34 @@ impl Room {
     ) -> Arc<Player> {
         // Add player to room
         log::debug!("[locking] Adding player to room: {:?}", player.get_name());
+        // check for previous connections to the player
+        let mut rem: Vec<Arc<Player>> = vec![];
         let ps = self.players.write().await;
-        let mut rem = vec![];
         for p in ps.iter() {
             if p.get_pid() == player.get_pid() {
                 rem.push(p.clone());
             }
         }
         drop(ps);
+        // for tests, we reuse the same id so don't disconnect prior connections
+        #[cfg(test)]
+        {
+            rem.drain(0..);
+        }
+        // remove prior connections if we can
         for p in rem {
             p.shutdown_err("client reconnected").await;
             self.player_left(&p).await;
         }
+        // actually join player
         self.add_player_joined_msg(&player).await;
         self.players.write().await.push(player.clone());
         player
     }
 
     pub async fn add_player_joined_msg(&self, player: &Arc<Player>) {
-        log::debug!("player joined, locking actions");
-        self.actions.write().await.push((
+        log::debug!("player joined, adding join action for {}", player.get_name());
+        let _ = self.add_action((
             MapAction::PlayerJoin {
                 name: player.get_name().into(),
                 account_id: player.get_pid().into(),
@@ -742,8 +787,8 @@ impl Room {
             (player.get_pid()).into(),
             SystemTime::now(),
             OnceCell::new(),
-        ).into());
-        log::debug!("player joined, unlocked actions");
+        ).into()).await;
+        // log::debug!("player joined, unlocked actions");
     }
 
     pub async fn send_player_room_details(&self, player: &Player) {
@@ -756,8 +801,10 @@ impl Room {
         let _ = stream.write_u8(self.deets.map_base).await;
         let _ = stream.write_u8(self.deets.base_car).await;
         let _ = stream.write_u8(self.deets.rules_flags).await;
+        // 4 + 6 = 10
         let _ = stream.write_u32_le(self.deets.item_max_size).await;
         let _ = stream.write_u16_le(self.deets.player_limit).await;
+        // 10 + 4 + 2 = 16
     }
 
     pub async fn player_left(&self, p: &Player) {
@@ -765,19 +812,17 @@ impl Room {
         let mut players = self.players.write().await;
         log::debug!("got players lock");
         players.retain(|x| x.token_resp.account_id != p.token_resp.account_id);
+        drop(players);
         let action = MapAction::PlayerLeave {
             name: p.token_resp.display_name.clone(),
             account_id: p.token_resp.account_id.clone(),
         };
-        drop(players);
-        log::debug!("getting actions lock");
-        self.actions.write().await.push((
+        let _ = self.add_action((
             action,
             (&p.token_resp.account_id).into(),
             SystemTime::now(),
             OnceCell::new(),
-        ).into());
-        log::debug!("got actions lock");
+        ).into()).await;
     }
 }
 
@@ -886,10 +931,13 @@ impl RoomManager {
                             return;
                         }
 
-                        if room.players.read().await.len() >= *room.player_limit.read().await as usize {
-                            log::warn!("Room full: {}", deets.room_id);
-                            player.shutdown_err("Room is full").await;
-                            return;
+                        // only deny entry by room full if we are not xertrov nor the room owner
+                        if player.get_pid() != XERTROV_WSID && player.get_pid() != room.owner.read().await.get_pid() {
+                            if room.players.read().await.len() >= *room.player_limit.read().await as usize {
+                                log::warn!("Room full: {}", deets.room_id);
+                                player.shutdown_err("Room is full").await;
+                                return;
+                            }
                         }
 
                         // player.stream_w.write().await.write(b"OK_").await;
