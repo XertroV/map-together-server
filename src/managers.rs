@@ -724,7 +724,7 @@ impl Room {
         // check if we have no players every 10ms. If we have no players for stale_minutes (20 minutes), close the room.
         let mut no_players = 0;
         let wait_ms = 10;
-        let stale_minutes = 20;
+        let stale_minutes = 720; // 20; // 720 = 12 hrs
         loop {
             let players = self.players.read().await;
             if players.len() == 0 {
@@ -858,7 +858,7 @@ impl RoomManager {
                 }
                 drop(rooms);
             }
-            time::sleep(Duration::from_secs(10)).await;
+            time::sleep(Duration::from_secs(1)).await;
         }
     }
 
@@ -916,8 +916,9 @@ impl RoomManager {
                         log::debug!("RoomConnectionDeets: {:?}", deets);
                         // Join room
                         let rooms = self.rooms.read().await;
+                        log::debug!("Got Rooms Read Lock");
                         let room = match rooms.get(&str_to_room_id(&deets.room_id).unwrap()) {
-                            Some(room) => room,
+                            Some(room) => room.clone(),
                             None => {
                                 log::warn!("Room not found: {}", deets.room_id);
                                 player.shutdown_err("room not found").await;
@@ -939,6 +940,8 @@ impl RoomManager {
                                 return;
                             }
                         }
+                        drop(rooms);
+                        log::debug!("Got room: {}", room.id_str.as_str());
 
                         // player.stream_w.write().await.write(b"OK_").await;
                         let player = Arc::new(player);
@@ -984,8 +987,16 @@ impl InitializationManager {
         }
 
         log::debug!("read token from {:?}", peer);
-
         let token = token.unwrap();
+        if token.len() == 0 {
+            log::warn!("Empty token from {:?}", peer);
+            let _ = stream.write_all(b"ERR").await;
+            let _ = write_lp_string(&mut stream, "empty token").await;
+            let _ = stream.shutdown().await;
+            return;
+        }
+
+
         log::debug!("Got token of length: {}", token.len());
 
         let token_resp = match check_token(&token, 521).await {
@@ -995,6 +1006,7 @@ impl InitializationManager {
                 let _ = stream.write_all(b"ERR").await;
                 let _ = write_lp_string(&mut stream, "auth token verification failed").await;
                 stream.shutdown().await.unwrap();
+                log::warn!("shutdown player, returning");
                 return;
             }
         };
