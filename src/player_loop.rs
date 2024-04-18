@@ -7,6 +7,7 @@ use tokio::time::{self, Duration};
 
 use futures::FutureExt;
 
+use crate::map_actions::{MapAction, PlayerID};
 use crate::{managers::*, DUMP_MBS};
 
 
@@ -89,11 +90,13 @@ pub async fn run_player_loop(player: Arc<Player>, room: Arc<Room>, mut action_rx
                                 });
                             }
                             let a = (a, player.get_pid().into(), SystemTime::now(), OnceCell::new());
-                            if !a.0.is_ephemeral() {
+                            if a.0.is_ephemeral() {
+                                ephemeral_action = Some(a);
+                            } else if a.0.is_ping() {
+                                let _ = Player::write_action(&mut *player.stream_w.write().await, &MapAction::ServerStats(*TOTAL_PLAYERS.read().await), &player.get_pid().into(), SystemTime::now(), &Default::default()).await;
+                            } else {
                                 action = Some(a);
                                 sync_actions = true;
-                            } else {
-                                ephemeral_action = Some(a);
                             }
                             // Sync actions to all players, consider optimizing this part
                         },

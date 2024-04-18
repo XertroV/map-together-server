@@ -48,6 +48,8 @@ pub const MAPPING_MSG_SET_VARIABLE: u8 = 17;
 pub const MAPPING_MSG_SET_ROOM_PLAYER_LIMIT: u8 = 18;
 pub const MAPPING_MSG_ALERT_STATUS_TO_ALL: u8 = 19;
 pub const MAPPING_MSG_CHAT_MSG: u8 = 20;
+pub const MAPPING_MSG_PING: u8 = 21;
+pub const MAPPING_MSG_SERVER_STATS: u8 = 22;
 
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone)]
@@ -72,6 +74,10 @@ pub enum MapAction {
     Admin_SetRoomPlayerLimit(u16),
     Admin_AlertStatusToAll(String),
     ChatMsg(u8, String),
+    /// only sent from player to server
+    Ping(),
+    /// players connected, response to ping
+    ServerStats(u32),
 }
 
 impl MapAction {
@@ -80,6 +86,10 @@ impl MapAction {
             self,
             MapAction::PlayerCamCursor(_) | MapAction::VehiclePos(_)
         )
+    }
+
+    pub fn is_ping(&self) -> bool {
+        matches!(self, MapAction::Ping())
     }
 
     pub fn get_type(&self) -> &'static str {
@@ -104,7 +114,8 @@ impl MapAction {
             MapAction::Admin_SetRoomPlayerLimit(_) => "Admin_SetRoomPlayerLimit",
             MapAction::Admin_AlertStatusToAll(_) => "Admin_AlertStatusToAll",
             MapAction::ChatMsg(_, _) => "ChatMsg",
-
+            MapAction::Ping() => "Ping",
+            MapAction::ServerStats(_) => "ServerStats",
         }
     }
 }
@@ -853,7 +864,7 @@ pub async fn dump_macroblocks(action: MapAction, player: Arc<Player>) {
                 spec.blocks.len(),
                 spec.items.len()
             );
-            tokio::fs::write(&fname, buf).await;
+            let _ = tokio::fs::write(&fname, buf).await;
             log::info!("wrote mb spec: {}", fname);
         }
         _ => {}

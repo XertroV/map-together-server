@@ -10,13 +10,14 @@ use tokio::sync::{Mutex, OnceCell, RwLock};
 use tokio::{select, time};
 use tokio::sync::mpsc::{self, channel, Receiver, Sender};
 
+use lazy_static::lazy_static;
 use futures::future::{self, Either};
 use std::ops::DerefMut;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::map_actions::{
-    MacroblockSpec, MapAction, PlayerID, SetSkinSpec, SkinSpec, WaypointSpec, MAPPING_MSG_ALERT_STATUS_TO_ALL, MAPPING_MSG_BAN_PLAYER, MAPPING_MSG_CHANGE_ADMIN, MAPPING_MSG_CHAT_MSG, MAPPING_MSG_DELETE, MAPPING_MSG_DEMOTE_MOD, MAPPING_MSG_KICK_PLAYER, MAPPING_MSG_PLACE, MAPPING_MSG_PLAYER_CAMCURSOR, MAPPING_MSG_PLAYER_JOIN, MAPPING_MSG_PLAYER_LEAVE, MAPPING_MSG_PLAYER_VEHICLEPOS, MAPPING_MSG_PROMOTE_MOD, MAPPING_MSG_RESYNC, MAPPING_MSG_SET_ACTION_LIMIT, MAPPING_MSG_SET_MAPNAME, MAPPING_MSG_SET_ROOM_PLAYER_LIMIT, MAPPING_MSG_SET_SKIN, MAPPING_MSG_SET_VARIABLE, MAPPING_MSG_SET_WAYPOINT
+    MacroblockSpec, MapAction, PlayerID, SetSkinSpec, SkinSpec, WaypointSpec, MAPPING_MSG_ALERT_STATUS_TO_ALL, MAPPING_MSG_BAN_PLAYER, MAPPING_MSG_CHANGE_ADMIN, MAPPING_MSG_CHAT_MSG, MAPPING_MSG_DELETE, MAPPING_MSG_DEMOTE_MOD, MAPPING_MSG_KICK_PLAYER, MAPPING_MSG_PING, MAPPING_MSG_PLACE, MAPPING_MSG_PLAYER_CAMCURSOR, MAPPING_MSG_PLAYER_JOIN, MAPPING_MSG_PLAYER_LEAVE, MAPPING_MSG_PLAYER_VEHICLEPOS, MAPPING_MSG_PROMOTE_MOD, MAPPING_MSG_RESYNC, MAPPING_MSG_SERVER_STATS, MAPPING_MSG_SET_ACTION_LIMIT, MAPPING_MSG_SET_MAPNAME, MAPPING_MSG_SET_ROOM_PLAYER_LIMIT, MAPPING_MSG_SET_SKIN, MAPPING_MSG_SET_VARIABLE, MAPPING_MSG_SET_WAYPOINT
 };
 use crate::msgs::{
     generate_room_id, room_id_to_str, str_to_room_id, PlayerCamCursor, PlayerVehiclePos, RoomConnectionDeets, RoomCreationDeets, RoomMsg
@@ -29,7 +30,7 @@ use crate::{ServerOpts, XERTROV_WSID};
 pub type ActionDesc = (MapAction, PlayerID, SystemTime, OnceCell<Vec<u8>>);
 pub type ActionDescArc = Arc<ActionDesc>;
 
-pub const CURR_VERSION_BYTES: [u8; 3] = [0xFF as u8, 0x04, 0x80];
+pub const CURR_VERSION_BYTES: [u8; 3] = [0xFF as u8, 0x05, 0x80];
 
 #[derive(Debug, Default)]
 struct PlayerSync {
@@ -328,6 +329,18 @@ impl Player {
                 stream.write_u32_le(buf.len() as u32).await?;
                 stream.write_all(&buf).await?;
                 write_pid_and_timestamp(stream, pid, time).await?;
+            },
+            MapAction::Ping() => {
+                // todo: respond with server stats
+                // do nothing
+            },
+            MapAction::ServerStats(nb_players) => {
+                let mut buf = vec![];
+                buf.write_u32_le(*nb_players).await?;
+                stream.write_u8(MAPPING_MSG_SERVER_STATS).await?;
+                stream.write_u32_le(buf.len() as u32).await?;
+                stream.write_all(&buf).await?;
+                write_pid_and_timestamp(stream, pid, time).await?;
             }
         }
         Ok(())
@@ -502,6 +515,18 @@ impl Player {
                 let msg = slice_to_lp_string(&buf[1..])?;
                 log::debug!("Chat from {}: {}", self.get_name(), msg);
                 Ok(MapAction::ChatMsg(ty, msg))
+            }
+            MAPPING_MSG_PING => {
+                // ping -> respond with server stats
+                Ok(MapAction::Ping())
+            }
+            MAPPING_MSG_SERVER_STATS => {
+                // ignore this later but need to read message anyway
+                let len = read_checked_msg_u32_len(stream).await?;
+                let mut buf = vec![0u8; len as usize];
+                stream.read_exact(&mut buf).await?;
+                log::debug!("Got server stats msg from {}??", self.get_name());
+                Ok(MapAction::ServerStats(u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]])))
             }
             _ => Err(StreamErr::InvalidData(format!(
                 "Unknown message type: {}",
@@ -832,6 +857,10 @@ pub struct RoomManager {
     pub dump_mbs: bool,
 }
 
+lazy_static! {
+    pub static ref TOTAL_PLAYERS: RwLock<u32> = RwLock::new(0);
+}
+
 impl RoomManager {
     pub fn new(opts: &ServerOpts) -> Self {
         RoomManager {
@@ -844,13 +873,22 @@ impl RoomManager {
         loop {
             let rooms = self.rooms.read().await;
             let mut to_remove = vec![];
+            let mut total_players: u32 = 0;
             for (id, room) in rooms.iter() {
                 if room.has_expired.initialized() {
                     to_remove.push(*id);
                     log::info!("Room expired: {:?}", room.id_str);
+                } else {
+                    match room.players.try_read() {
+                        Ok(ps) => {
+                            total_players += ps.len() as u32;
+                        },
+                        Err(_) => {},
+                    }
                 }
             }
             drop(rooms);
+            *TOTAL_PLAYERS.write().await = total_players;
             if to_remove.len() > 0 {
                 let mut rooms = self.rooms.write().await;
                 for id in to_remove {
@@ -880,12 +918,12 @@ impl RoomManager {
             Ok(_) => {
                 // version flag 0xFF and version number with high bit set as flag.
                 if ver_buf != CURR_VERSION_BYTES {
-                    let err_msg = format!("\\$f40Invalid version bytes: 0x {:x} {:x} {:x}", ver_buf[0], ver_buf[1], ver_buf[2]);
+                    let err_msg = format!("\\$f40Invalid version bytes: 0x {:x} {:x} {:x}, please update", ver_buf[0], ver_buf[1], ver_buf[2]);
                     log::warn!("{}", err_msg);
                     #[cfg(test)]
                     write_lp_string_owh(&mut *player.stream_w.write().await, &err_msg).await.unwrap();
-                    write_lp_string_owh(&mut *player.stream_w.write().await, "\\$s\\$f84 Invalid version: please update.\n").await.unwrap();
-                    player.shutdown_err("invalid version byte").await;
+                    // write_lp_string_owh(&mut *player.stream_w.write().await, "\\$s\\$f84 Invalid version: please update.\n").await.unwrap();
+                    player.shutdown_err("\\$s\\$f84 Invalid version: please update.\n").await;
                     return;
                 }
             }
