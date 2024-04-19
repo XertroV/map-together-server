@@ -110,47 +110,6 @@ impl Player {
                 }
             }
         });
-        // sync.last_sync += new_actions.len();
-        // drop(sync);
-        // let actions_chunk = new_actions.chunks(1000);
-        // for action in new_actions {
-        //     match self.action_tx.try_send(action.clone()) {
-        //         Ok(_) => {
-        //             log::debug!(
-        //                 "Wrote sync action: {:?} -> player {:?} to queue",
-        //                 action.0.get_type(),
-        //                 self.get_name()
-        //             );
-        //         }
-        //         Err(e) => {
-        //             match e {
-        //                 mpsc::error::TrySendError::Full(_) => {
-        //                     log::error!("Error (Full) sending action to player {:?}: {:?} - dropping", self.get_name(), e);
-        //                 },
-        //                 mpsc::error::TrySendError::Closed(_) => {
-        //                     log::error!("Error sending action to player {:?}: {:?} - dropping", self.get_name(), e);
-        //                 },
-        //             }
-        //         }
-        //     }
-        // }
-
-
-
-
-        // let name: String = self.get_name().into();
-        // tokio::spawn(async move {
-        //     let mut stream = stream.write().await;
-        //     for action in new_actions {
-        //         Self::write_action(&mut *stream, &action.0, &action.1, action.2, &action.3)
-        //             .await;
-        //         log::debug!(
-        //             "Wrote action: {:?} -> player {:?}",
-        //             action.0.get_type(),
-        //             name
-        //         );
-        //     }
-        // });
     }
 
     pub async fn write_action(
@@ -741,7 +700,13 @@ impl Room {
                 let players = this_room.players.read().await;
                 let actions = this_room.actions.read().await;
                 for player in players.iter() {
-                    player.sync_actions(&actions).await;
+                    if player.action_tx.is_closed() {
+                        log::info!("Player action tx closed, removing player: {:?}", player.get_name());
+                        player.shutdown_err("failed to send actions, please reconnect").await;
+                        this_room.player_left(&player).await;
+                    } else {
+                        player.sync_actions(&actions).await;
+                    }
                 }
             }
         });
@@ -749,7 +714,8 @@ impl Room {
         // check if we have no players every 10ms. If we have no players for stale_minutes (20 minutes), close the room.
         let mut no_players = 0;
         let wait_ms = 10;
-        let stale_minutes = 720; // 20; // 720 = 12 hrs
+        // let stale_minutes = 720; // 20; // 720 = 12 hrs
+        let stale_minutes = 30; // 20; // 720 = 12 hrs
         loop {
             let players = self.players.read().await;
             if players.len() == 0 {
@@ -964,20 +930,26 @@ impl RoomManager {
                             }
                         };
 
-                        if room.deets.password.len() > 0 && room.deets.password != deets.password {
+                        let is_xert = player.get_pid() == XERTROV_WSID;
+                        let password_match = room.deets.password.len() == 0 || room.deets.password == deets.password;
+
+                        if !password_match && !is_xert {
                             log::warn!("Invalid password for room: {}", deets.room_id);
                             player.shutdown_err("invalid password").await;
                             return;
                         }
 
+                        let is_owner = player.get_pid() == room.owner.read().await.get_pid();
+
                         // only deny entry by room full if we are not xertrov nor the room owner
-                        if player.get_pid() != XERTROV_WSID && player.get_pid() != room.owner.read().await.get_pid() {
+                        if !is_owner && !is_xert {
                             if room.players.read().await.len() >= *room.player_limit.read().await as usize {
                                 log::warn!("Room full: {}", deets.room_id);
                                 player.shutdown_err("Room is full").await;
                                 return;
                             }
                         }
+
                         drop(rooms);
                         log::debug!("Got room: {}", room.id_str.as_str());
 
