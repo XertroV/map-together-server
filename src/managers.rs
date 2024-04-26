@@ -527,7 +527,7 @@ impl Player {
 
 pub async fn read_checked_msg_u32_len(stream: &mut OwnedReadHalf) -> Result<u32, StreamErr> {
     let len = stream.read_u32_le().await?;
-    if len > 5000000 {
+    if len > 7000000 {
         return Err(StreamErr::InvalidData(format!("Message too large: {}", len)));
     }
     Ok(len)
@@ -1002,6 +1002,14 @@ impl InitializationManager {
             log::warn!("Empty token from {:?}", peer);
             let _ = stream.write_all(b"ERR").await;
             let _ = write_lp_string(&mut stream, "empty token").await;
+            let _ = stream.shutdown().await;
+            return;
+        }
+
+        if token.len() < 100 {
+            log::warn!("Short token from {:?}", peer);
+            let _ = stream.write_all(b"ERR").await;
+            let _ = write_lp_string(&mut stream, "auth token too short").await;
             let _ = stream.shutdown().await;
             return;
         }

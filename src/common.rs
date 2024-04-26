@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use rand::Rng;
-use tokio::{net::TcpListener, sync::RwLock};
+use tokio::{io::Interest, net::TcpListener, sync::RwLock};
 
 use crate::managers::*;
 
@@ -32,7 +32,14 @@ pub async fn run_server(
 
         // Spawn a new task for each connection
         tokio::spawn(async move {
-            init_manager_clone.initialize_connection(socket).await;
+            match socket.ready(Interest::READABLE).await {
+                Ok(_) => {
+                    init_manager_clone.initialize_connection(socket).await;
+                }
+                Err(e) => {
+                    log::error!("Error waiting for socket readiness: {:?}", e);
+                }
+            }
         });
     }
 }
