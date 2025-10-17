@@ -44,18 +44,23 @@ pub struct Player {
     pub stream_w: Arc<RwLock<OwnedWriteHalf>>,
     sync: RwLock<PlayerSync>,
     pub action_tx: Sender<ActionDescArc>,
+    pub shutdown_tx: Sender<()>,
+    pub shutdown_rx: RwLock<Option<Receiver<()>>>,
 }
 
 impl Player {
     pub fn new(token_resp: TokenResp, stream: TcpStream) -> (Self, Receiver<ActionDescArc>) {
         let (r, w) = stream.into_split();
-        let (action_tx, action_rx) = mpsc::channel(50000);
+        let (action_tx, action_rx) = mpsc::channel(51000);
+        let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
         (Player {
             token_resp,
             stream_r: Arc::new(r.into()),
             stream_w: Arc::new(w.into()),
             sync: RwLock::new(PlayerSync::default()),
-            action_tx
+            action_tx,
+            shutdown_tx,
+            shutdown_rx: RwLock::new(Some(shutdown_rx)),
         }, action_rx)
     }
 
@@ -644,7 +649,7 @@ impl Room {
         let id_str = room_id_to_str(id);
         let player_arc: Arc<_> = player.into();
         let player_limit = deets.player_limit.into();
-        let (room_tx_action, room_rx_action) = channel(50000);
+        let (room_tx_action, room_rx_action) = channel(52000);
         let room = Room {
             id,
             id_str,

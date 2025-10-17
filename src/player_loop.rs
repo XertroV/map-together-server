@@ -34,7 +34,7 @@ pub async fn run_player_loop(player: Arc<Player>, room: Arc<Room>, mut action_rx
         loop {
             match action_rx.recv().await {
                 None => {
-                    log::info!("[{}] Player loop ended for player {}", room.id_str, p.get_name());
+                    log::info!("[{}] Player write loop ended for player {}", room.id_str, p.get_name());
                     break;
                 },
                 Some(action) => {
@@ -58,6 +58,7 @@ pub async fn run_player_loop(player: Arc<Player>, room: Arc<Room>, mut action_rx
 
     // read loop
     tokio::spawn(async move {
+        let mut shutdown_rx = player.shutdown_rx.write().await.take().unwrap();
         loop {
             let start = SystemTime::now();
             let mut sync_actions = false;
@@ -78,6 +79,10 @@ pub async fn run_player_loop(player: Arc<Player>, room: Arc<Room>, mut action_rx
             // room.actions.lock().await.push(action.into());
             // log::debug!("Pushed action into room actions");
             select! {
+                _ = shutdown_rx.recv() => {
+                    log::info!("[{}] Player loop shutdown; ended for player {:?}", room.id_str, player.get_name());
+                    break;
+                },
                 _ = readable => {
                     match player.read_map_msg().await {
                         Ok(a) => {
@@ -102,10 +107,6 @@ pub async fn run_player_loop(player: Arc<Player>, room: Arc<Room>, mut action_rx
                         },
                         Err(e) => {
                             log::error!("Error reading map message from player {:?}: {:?}", player, e);
-                            player.shutdown_err("error reading map message").await;
-                            // Handle player disconnect or error
-                            room.player_left(&player).await;
-                            log::info!("Player left: {:?}", player.get_name());
                             break; // Ends the loop and thus the task for this player
                         },
                     }
@@ -159,6 +160,12 @@ pub async fn run_player_loop(player: Arc<Player>, room: Arc<Room>, mut action_rx
                 }
             }
         }
+
+        player.shutdown_err("error reading map message").await;
+        // Handle player disconnect or error
+        room.player_left(&player).await;
+        log::info!("Player left: {:?}", player.get_name());
+
         log::info!("[{}] Player loop ended for player {:?}", room.id_str, player.get_name());
     });
 }
