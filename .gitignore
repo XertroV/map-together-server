@@ -1,3 +1,4 @@
 /target
 config.json
 *.mb_spec
+.worktrees/

@@ -3,8 +3,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crate::msgs::*;
 use crate::managers::*;
+use crate::msgs::*;
 use crate::mt_codec::*;
 
 /// WSID
@@ -60,8 +60,14 @@ pub enum MapAction {
     SetSkin(SetSkinSpec),
     SetWaypoint(WaypointSpec),
     SetMapName(String),
-    PlayerJoin { name: String, account_id: String },
-    PlayerLeave { name: String, account_id: String },
+    PlayerJoin {
+        name: String,
+        account_id: String,
+    },
+    PlayerLeave {
+        name: String,
+        account_id: String,
+    },
     Admin_PromoteMod(PlayerID),
     Admin_DemoteMod(PlayerID),
     Admin_KickPlayer(PlayerID),
@@ -124,11 +130,138 @@ impl MapAction {
 pub struct MacroblockSpec {
     pub blocks: Vec<BlockSpec>,
     pub items: Vec<ItemSpec>,
+    pub terrains: Vec<TerrainSpec>,
+}
+
+/// One zone in a terrain cell genealogy column (name + height at that layer).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerrainZone {
+    pub name: String,
+    pub height: i32,
+}
+
+/// One macroblock terrain cell. Layout matches E++ `TerrainSpec`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerrainSpec {
+    pub offset: [i32; 3],
+    pub zones: Vec<TerrainZone>,
+    pub current_index: u32,
+    pub dir: u32,
+    pub base_height: i32,
+    pub bottom_height: i32,
+    pub top_height: i32,
 }
 
 const MAGIC_BLOCKS: &[u8; 4] = b"BLKs";
 const MAGIC_ITEMS: &[u8; 4] = b"ITMs";
 const MAGIC_SKINS: &[u8; 4] = b"SKNs";
+const MAGIC_TERRAINS: &[u8; 4] = b"TRNs";
+
+fn require_bytes(buf: &[u8], cur: usize, n: usize, what: &str) -> Result<(), StreamErr> {
+    if buf.len().saturating_sub(cur) < n {
+        return Err(StreamErr::InvalidData(format!("truncated {what}")));
+    }
+    Ok(())
+}
+
+fn read_magic(
+    buf: &[u8],
+    cur: &mut usize,
+    expected: &[u8; 4],
+    what: &str,
+) -> Result<(), StreamErr> {
+    require_bytes(buf, *cur, 4, what)?;
+    if &buf[*cur..*cur + 4] != expected {
+        return Err(StreamErr::InvalidData(format!(
+            "expected magic bytes for {what}"
+        )));
+    }
+    *cur += 4;
+    Ok(())
+}
+
+fn read_u16_le(buf: &[u8], cur: &mut usize, what: &str) -> Result<u16, StreamErr> {
+    require_bytes(buf, *cur, 2, what)?;
+    let v = u16::from_le_bytes([buf[*cur], buf[*cur + 1]]);
+    *cur += 2;
+    Ok(v)
+}
+
+fn read_i32_le(buf: &[u8], cur: &mut usize, what: &str) -> Result<i32, StreamErr> {
+    require_bytes(buf, *cur, 4, what)?;
+    let v = i32::from_le_bytes(buf[*cur..*cur + 4].try_into().unwrap());
+    *cur += 4;
+    Ok(v)
+}
+
+fn read_u32_le(buf: &[u8], cur: &mut usize, what: &str) -> Result<u32, StreamErr> {
+    require_bytes(buf, *cur, 4, what)?;
+    let v = u32::from_le_bytes(buf[*cur..*cur + 4].try_into().unwrap());
+    *cur += 4;
+    Ok(v)
+}
+
+impl TerrainSpec {
+    fn decode_with_len(buf: &[u8]) -> Result<(Self, usize), StreamErr> {
+        let mut cur = 0;
+        let ox = read_i32_le(buf, &mut cur, "terrain offset")?;
+        let oy = read_i32_le(buf, &mut cur, "terrain offset")?;
+        let oz = read_i32_le(buf, &mut cur, "terrain offset")?;
+        require_bytes(buf, cur, 1, "terrain zone count")?;
+        let zone_count = buf[cur];
+        cur += 1;
+        let mut zones = Vec::with_capacity(zone_count as usize);
+        for _ in 0..zone_count {
+            let name = slice_to_lp_string(&buf[cur..])?;
+            cur += 2 + name.len();
+            let height = read_i32_le(buf, &mut cur, "terrain zone height")?;
+            zones.push(TerrainZone { name, height });
+        }
+        let current_index = read_u32_le(buf, &mut cur, "terrain current_index")?;
+        let dir = read_u32_le(buf, &mut cur, "terrain dir")?;
+        let base_height = read_i32_le(buf, &mut cur, "terrain base_height")?;
+        let bottom_height = read_i32_le(buf, &mut cur, "terrain bottom_height")?;
+        let top_height = read_i32_le(buf, &mut cur, "terrain top_height")?;
+        Ok((
+            TerrainSpec {
+                offset: [ox, oy, oz],
+                zones,
+                current_index,
+                dir,
+                base_height,
+                bottom_height,
+                top_height,
+            },
+            cur,
+        ))
+    }
+}
+
+impl MTDecode for TerrainSpec {
+    fn decode(buf: &[u8]) -> Result<Self, StreamErr> {
+        Ok(Self::decode_with_len(buf)?.0)
+    }
+}
+
+impl MTEncode for TerrainSpec {
+    fn encode(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&self.offset[0].to_le_bytes());
+        buf.extend_from_slice(&self.offset[1].to_le_bytes());
+        buf.extend_from_slice(&self.offset[2].to_le_bytes());
+        buf.push(self.zones.len() as u8);
+        for zone in &self.zones {
+            write_lp_string_to_buf(&mut buf, &zone.name);
+            buf.extend_from_slice(&zone.height.to_le_bytes());
+        }
+        buf.extend_from_slice(&self.current_index.to_le_bytes());
+        buf.extend_from_slice(&self.dir.to_le_bytes());
+        buf.extend_from_slice(&self.base_height.to_le_bytes());
+        buf.extend_from_slice(&self.bottom_height.to_le_bytes());
+        buf.extend_from_slice(&self.top_height.to_le_bytes());
+        buf
+    }
+}
 
 impl MTDecode for MacroblockSpec {
     fn decode(buf: &[u8]) -> Result<Self, StreamErr> {
@@ -138,59 +271,61 @@ impl MTDecode for MacroblockSpec {
         let mut items = Vec::new();
 
         // blocks
-        if &buf[cur..(cur + 4)] != MAGIC_BLOCKS {
-            return Err(StreamErr::InvalidData(
-                "expected magic bytes for blocks".to_string(),
-            ));
-        }
-        cur += 4;
-
-        let block_count = u16::from_le_bytes([buf[cur], buf[cur + 1]]);
-        cur += 2;
+        read_magic(buf, &mut cur, MAGIC_BLOCKS, "blocks")?;
+        let block_count = read_u16_le(buf, &mut cur, "block count")?;
         for _ in 0..block_count {
             let block = BlockSpec::decode(&buf[cur..])?;
-            // cur += 2 + block.name.len() + 4 + 2 + block.author.len() + 12 + 2 + 12 + 1 + 1 + 4 + 4 + 4 + 1;
             cur += block.encoded_len;
-            // if let Some(waypoint) = &block.waypoint {
-            //     cur += 2 + waypoint.tag.len() + 4;
-            // }
             blocks.push(block);
         }
 
         // skins (expect none)
-        if &buf[cur..(cur + 4)] != MAGIC_SKINS {
-            return Err(StreamErr::InvalidData(
-                "expected magic bytes for items".to_string(),
-            ));
-        }
-        cur += 4;
-
-        let skin_count = u16::from_le_bytes([buf[cur], buf[cur + 1]]);
-        cur += 2;
+        read_magic(buf, &mut cur, MAGIC_SKINS, "skins")?;
+        let skin_count = read_u16_le(buf, &mut cur, "skin count")?;
         if skin_count > 0 {
             return Err(StreamErr::InvalidData("skins not implemented".to_string()));
         }
 
         // items
-        if &buf[cur..(cur + 4)] != MAGIC_ITEMS {
-            return Err(StreamErr::InvalidData(
-                "expected magic bytes for items".to_string(),
-            ));
-        }
-        cur += 4;
-
-        let item_count = u16::from_le_bytes([buf[cur], buf[cur + 1]]);
-        cur += 2;
+        read_magic(buf, &mut cur, MAGIC_ITEMS, "items")?;
+        let item_count = read_u16_le(buf, &mut cur, "item count")?;
         for _ in 0..item_count {
             let item = ItemSpec::decode(&buf[cur..])?;
-            // cur += 2 + item.name.len() + 4 + 2 + item.author.len() + 12 + 1 + 12 + 4 + 1 + 1 + 1 + 36 + 12 + 1 + 2 + 4 + 4;
             cur += item.decoded_len;
-            // if let Some(waypoint) = &item.waypoint {
-            //     cur += 2 + waypoint.tag.len() + 4;
-            // }
             items.push(item);
         }
-        Ok(MacroblockSpec { blocks, items })
+
+        // Optional trailing TRNs. Presence of the chunk is the version flag:
+        // omit entirely when empty (byte-identical to pre-terrain writers).
+        let remaining = buf.len().saturating_sub(cur);
+        let terrains = if remaining == 0 {
+            Vec::new()
+        } else if remaining < 6 {
+            return Err(StreamErr::InvalidData(
+                "truncated terrain chunk header".to_string(),
+            ));
+        } else {
+            read_magic(buf, &mut cur, MAGIC_TERRAINS, "terrains")?;
+            let terrain_count = read_u16_le(buf, &mut cur, "terrain count")?;
+            let mut terrains = Vec::with_capacity(terrain_count as usize);
+            for _ in 0..terrain_count {
+                let (terrain, n) = TerrainSpec::decode_with_len(&buf[cur..])?;
+                cur += n;
+                terrains.push(terrain);
+            }
+            if cur != buf.len() {
+                return Err(StreamErr::InvalidData(
+                    "trailing bytes after terrain chunk".to_string(),
+                ));
+            }
+            terrains
+        };
+
+        Ok(MacroblockSpec {
+            blocks,
+            items,
+            terrains,
+        })
     }
 }
 
@@ -208,6 +343,14 @@ impl MTEncode for MacroblockSpec {
         buf.extend_from_slice(&(self.items.len() as u16).to_le_bytes());
         for item in &self.items {
             buf.extend_from_slice(&item.encode());
+        }
+        // Empty TRNs is omitted so old clients see a pre-terrain payload.
+        if !self.terrains.is_empty() {
+            buf.extend_from_slice(MAGIC_TERRAINS);
+            buf.extend_from_slice(&(self.terrains.len() as u16).to_le_bytes());
+            for terrain in &self.terrains {
+                buf.extend_from_slice(&terrain.encode());
+            }
         }
         buf
     }
@@ -859,14 +1002,155 @@ pub async fn dump_macroblocks(action: MapAction, player: Arc<Player>) {
             let mut buf = spec.encode();
             write_pid_and_timestamp_to_buf(&mut buf, player.get_pid(), now);
             let fname = format!(
-                "./mb-{}-b{}-i{}.mb_spec",
+                "./mb-{}-b{}-i{}-t{}.mb_spec",
                 ts,
                 spec.blocks.len(),
-                spec.items.len()
+                spec.items.len(),
+                spec.terrains.len()
             );
             let _ = tokio::fs::write(&fname, buf).await;
             log::info!("wrote mb spec: {}", fname);
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mt_codec::{MTDecode, MTEncode};
+
+    /// `BLKs 0 / SKNs 0 / ITMs 0` — the pre-terrain empty payload.
+    fn empty_pre_terrain_payload() -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(b"BLKs");
+        b.extend_from_slice(&0u16.to_le_bytes());
+        b.extend_from_slice(b"SKNs");
+        b.extend_from_slice(&0u16.to_le_bytes());
+        b.extend_from_slice(b"ITMs");
+        b.extend_from_slice(&0u16.to_le_bytes());
+        b
+    }
+
+    /// Same two-zone cell as E++ `MakeTestTerrainSpec`.
+    fn sample_terrain() -> TerrainSpec {
+        TerrainSpec {
+            offset: [3, 0, 7],
+            zones: vec![
+                TerrainZone {
+                    name: "VoidToDirt".into(),
+                    height: 0,
+                },
+                TerrainZone {
+                    name: "DirtCliff8".into(),
+                    height: 8,
+                },
+            ],
+            current_index: 1,
+            dir: 2,
+            base_height: 0,
+            bottom_height: 0,
+            top_height: 8,
+        }
+    }
+
+    /// Independent of `TerrainSpec::encode`: bytes from the published layout.
+    fn sample_terrain_bytes() -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(&3i32.to_le_bytes());
+        b.extend_from_slice(&0i32.to_le_bytes());
+        b.extend_from_slice(&7i32.to_le_bytes());
+        b.push(2u8);
+        b.extend_from_slice(&10u16.to_le_bytes());
+        b.extend_from_slice(b"VoidToDirt");
+        b.extend_from_slice(&0i32.to_le_bytes());
+        b.extend_from_slice(&10u16.to_le_bytes());
+        b.extend_from_slice(b"DirtCliff8");
+        b.extend_from_slice(&8i32.to_le_bytes());
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.extend_from_slice(&2u32.to_le_bytes());
+        b.extend_from_slice(&0i32.to_le_bytes());
+        b.extend_from_slice(&0i32.to_le_bytes());
+        b.extend_from_slice(&8i32.to_le_bytes());
+        b
+    }
+
+    #[test]
+    fn old_payload_decodes_empty_terrains_and_reencodes_identically() {
+        let input = empty_pre_terrain_payload();
+        let spec = MacroblockSpec::decode(&input).expect("decode old payload");
+        assert!(spec.blocks.is_empty());
+        assert!(spec.items.is_empty());
+        assert!(spec.terrains.is_empty());
+        assert_eq!(spec.encode(), input);
+    }
+
+    #[test]
+    fn terrain_roundtrip_preserves_bytes_and_fields() {
+        let spec = MacroblockSpec {
+            blocks: vec![],
+            items: vec![],
+            terrains: vec![sample_terrain()],
+        };
+        let encoded = spec.encode();
+        let mut expected = empty_pre_terrain_payload();
+        expected.extend_from_slice(b"TRNs");
+        expected.extend_from_slice(&1u16.to_le_bytes());
+        expected.extend_from_slice(&sample_terrain_bytes());
+        assert_eq!(encoded, expected, "encode must match the published layout");
+
+        let decoded = MacroblockSpec::decode(&encoded).expect("decode terrain payload");
+        assert_eq!(decoded.terrains, spec.terrains);
+        assert_eq!(decoded.encode(), encoded);
+    }
+
+    #[test]
+    fn trailing_garbage_after_items_is_invalid() {
+        let mut input = empty_pre_terrain_payload();
+        input.extend_from_slice(b"NOPE");
+        input.extend_from_slice(&0u16.to_le_bytes());
+        let err = MacroblockSpec::decode(&input).expect_err("garbage after ITMs");
+        match err {
+            StreamErr::InvalidData(_) => {}
+            other => panic!("expected InvalidData, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn truncated_trns_header_is_invalid_without_panic() {
+        let base = empty_pre_terrain_payload();
+        for n in 1..=5 {
+            let mut input = base.clone();
+            input.extend_from_slice(&b"TRNs\x01\x00"[..n]);
+            let err = MacroblockSpec::decode(&input)
+                .expect_err(&format!("expected Err for {n} leftover bytes"));
+            match err {
+                StreamErr::InvalidData(_) => {}
+                other => panic!("expected InvalidData for {n} leftover bytes, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn empty_trns_chunk_decodes_empty_and_encode_omits_it() {
+        let mut input = empty_pre_terrain_payload();
+        input.extend_from_slice(b"TRNs");
+        input.extend_from_slice(&0u16.to_le_bytes());
+        let spec = MacroblockSpec::decode(&input).expect("decode empty TRNs");
+        assert!(spec.terrains.is_empty());
+        assert_eq!(spec.encode(), empty_pre_terrain_payload());
+    }
+
+    #[test]
+    fn truncated_terrain_record_is_invalid_without_panic() {
+        let mut input = empty_pre_terrain_payload();
+        input.extend_from_slice(b"TRNs");
+        input.extend_from_slice(&1u16.to_le_bytes());
+        input.extend_from_slice(&3i32.to_le_bytes()); // incomplete record
+        let err = MacroblockSpec::decode(&input).expect_err("truncated terrain record");
+        match err {
+            StreamErr::InvalidData(_) | StreamErr::Io(_) => {}
+            other => panic!("expected InvalidData or Io, got {other:?}"),
+        }
     }
 }
