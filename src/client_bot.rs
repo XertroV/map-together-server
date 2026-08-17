@@ -334,6 +334,7 @@ async fn main() {
 mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
+    #[ignore = "live bot loop; one adapter, no seam yet"]
     async fn test_client_bots() {
         super::run_client_bot().await;
     }

@@ -157,89 +157,48 @@ const MAGIC_ITEMS: &[u8; 4] = b"ITMs";
 const MAGIC_SKINS: &[u8; 4] = b"SKNs";
 const MAGIC_TERRAINS: &[u8; 4] = b"TRNs";
 
-fn require_bytes(buf: &[u8], cur: usize, n: usize, what: &str) -> Result<(), StreamErr> {
-    if buf.len().saturating_sub(cur) < n {
-        return Err(StreamErr::InvalidData(format!("truncated {what}")));
-    }
-    Ok(())
-}
-
-fn read_magic(
-    buf: &[u8],
-    cur: &mut usize,
-    expected: &[u8; 4],
+fn decode_flagged<T: MTDecode>(
+    cur: &mut DecodeCursor,
+    len_of: impl Fn(&T) -> usize,
     what: &str,
-) -> Result<(), StreamErr> {
-    require_bytes(buf, *cur, 4, what)?;
-    if &buf[*cur..*cur + 4] != expected {
-        return Err(StreamErr::InvalidData(format!(
-            "expected magic bytes for {what}"
-        )));
+) -> Result<Option<T>, StreamErr> {
+    let flag = cur.u8(what)?;
+    if flag == 0 {
+        Ok(None)
+    } else {
+        let v = T::decode(cur.rest())?;
+        cur.skip(len_of(&v), what)?;
+        Ok(Some(v))
     }
-    *cur += 4;
-    Ok(())
-}
-
-fn read_u16_le(buf: &[u8], cur: &mut usize, what: &str) -> Result<u16, StreamErr> {
-    require_bytes(buf, *cur, 2, what)?;
-    let v = u16::from_le_bytes([buf[*cur], buf[*cur + 1]]);
-    *cur += 2;
-    Ok(v)
-}
-
-fn read_i32_le(buf: &[u8], cur: &mut usize, what: &str) -> Result<i32, StreamErr> {
-    require_bytes(buf, *cur, 4, what)?;
-    let v = i32::from_le_bytes(buf[*cur..*cur + 4].try_into().unwrap());
-    *cur += 4;
-    Ok(v)
-}
-
-fn read_u32_le(buf: &[u8], cur: &mut usize, what: &str) -> Result<u32, StreamErr> {
-    require_bytes(buf, *cur, 4, what)?;
-    let v = u32::from_le_bytes(buf[*cur..*cur + 4].try_into().unwrap());
-    *cur += 4;
-    Ok(v)
 }
 
 impl TerrainSpec {
-    fn decode_with_len(buf: &[u8]) -> Result<(Self, usize), StreamErr> {
-        let mut cur = 0;
-        let ox = read_i32_le(buf, &mut cur, "terrain offset")?;
-        let oy = read_i32_le(buf, &mut cur, "terrain offset")?;
-        let oz = read_i32_le(buf, &mut cur, "terrain offset")?;
-        require_bytes(buf, cur, 1, "terrain zone count")?;
-        let zone_count = buf[cur];
-        cur += 1;
+    fn decode_from(cur: &mut DecodeCursor) -> Result<Self, StreamErr> {
+        let ox = cur.i32_le("terrain offset")?;
+        let oy = cur.i32_le("terrain offset")?;
+        let oz = cur.i32_le("terrain offset")?;
+        let zone_count = cur.u8("terrain zone count")?;
         let mut zones = Vec::with_capacity(zone_count as usize);
         for _ in 0..zone_count {
-            let name = slice_to_lp_string(&buf[cur..])?;
-            cur += 2 + name.len();
-            let height = read_i32_le(buf, &mut cur, "terrain zone height")?;
+            let name = cur.lp_string("terrain zone name")?;
+            let height = cur.i32_le("terrain zone height")?;
             zones.push(TerrainZone { name, height });
         }
-        let current_index = read_u32_le(buf, &mut cur, "terrain current_index")?;
-        let dir = read_u32_le(buf, &mut cur, "terrain dir")?;
-        let base_height = read_i32_le(buf, &mut cur, "terrain base_height")?;
-        let bottom_height = read_i32_le(buf, &mut cur, "terrain bottom_height")?;
-        let top_height = read_i32_le(buf, &mut cur, "terrain top_height")?;
-        Ok((
-            TerrainSpec {
-                offset: [ox, oy, oz],
-                zones,
-                current_index,
-                dir,
-                base_height,
-                bottom_height,
-                top_height,
-            },
-            cur,
-        ))
+        Ok(TerrainSpec {
+            offset: [ox, oy, oz],
+            zones,
+            current_index: cur.u32_le("terrain current_index")?,
+            dir: cur.u32_le("terrain dir")?,
+            base_height: cur.i32_le("terrain base_height")?,
+            bottom_height: cur.i32_le("terrain bottom_height")?,
+            top_height: cur.i32_le("terrain top_height")?,
+        })
     }
 }
 
 impl MTDecode for TerrainSpec {
     fn decode(buf: &[u8]) -> Result<Self, StreamErr> {
-        Ok(Self::decode_with_len(buf)?.0)
+        Self::decode_from(&mut DecodeCursor::new(buf))
     }
 }
 
@@ -265,55 +224,48 @@ impl MTEncode for TerrainSpec {
 
 impl MTDecode for MacroblockSpec {
     fn decode(buf: &[u8]) -> Result<Self, StreamErr> {
-        // expect payload to have blocks, skins, and items prefixed with magic bytes in that order
-        let mut cur = 0;
+        let mut cur = DecodeCursor::new(buf);
         let mut blocks = Vec::new();
         let mut items = Vec::new();
 
-        // blocks
-        read_magic(buf, &mut cur, MAGIC_BLOCKS, "blocks")?;
-        let block_count = read_u16_le(buf, &mut cur, "block count")?;
+        cur.magic(MAGIC_BLOCKS, "blocks")?;
+        let block_count = cur.u16_le("block count")?;
         for _ in 0..block_count {
-            let block = BlockSpec::decode(&buf[cur..])?;
-            cur += block.encoded_len;
+            let block = BlockSpec::decode(cur.rest())?;
+            cur.skip(block.encoded_len, "block")?;
             blocks.push(block);
         }
 
-        // skins (expect none)
-        read_magic(buf, &mut cur, MAGIC_SKINS, "skins")?;
-        let skin_count = read_u16_le(buf, &mut cur, "skin count")?;
+        cur.magic(MAGIC_SKINS, "skins")?;
+        let skin_count = cur.u16_le("skin count")?;
         if skin_count > 0 {
             return Err(StreamErr::InvalidData("skins not implemented".to_string()));
         }
 
-        // items
-        read_magic(buf, &mut cur, MAGIC_ITEMS, "items")?;
-        let item_count = read_u16_le(buf, &mut cur, "item count")?;
+        cur.magic(MAGIC_ITEMS, "items")?;
+        let item_count = cur.u16_le("item count")?;
         for _ in 0..item_count {
-            let item = ItemSpec::decode(&buf[cur..])?;
-            cur += item.decoded_len;
+            let item = ItemSpec::decode(cur.rest())?;
+            cur.skip(item.decoded_len, "item")?;
             items.push(item);
         }
 
         // Optional trailing TRNs. Presence of the chunk is the version flag:
         // omit entirely when empty (byte-identical to pre-terrain writers).
-        let remaining = buf.len().saturating_sub(cur);
-        let terrains = if remaining == 0 {
+        let terrains = if cur.is_empty() {
             Vec::new()
-        } else if remaining < 6 {
+        } else if cur.remaining() < 6 {
             return Err(StreamErr::InvalidData(
                 "truncated terrain chunk header".to_string(),
             ));
         } else {
-            read_magic(buf, &mut cur, MAGIC_TERRAINS, "terrains")?;
-            let terrain_count = read_u16_le(buf, &mut cur, "terrain count")?;
+            cur.magic(MAGIC_TERRAINS, "terrains")?;
+            let terrain_count = cur.u16_le("terrain count")?;
             let mut terrains = Vec::with_capacity(terrain_count as usize);
             for _ in 0..terrain_count {
-                let (terrain, n) = TerrainSpec::decode_with_len(&buf[cur..])?;
-                cur += n;
-                terrains.push(terrain);
+                terrains.push(TerrainSpec::decode_from(&mut cur)?);
             }
-            if cur != buf.len() {
+            if !cur.is_empty() {
                 return Err(StreamErr::InvalidData(
                     "trailing bytes after terrain chunk".to_string(),
                 ));
@@ -367,36 +319,21 @@ pub struct SetSkinSpec {
 
 impl MTDecode for SetSkinSpec {
     fn decode(buf: &[u8]) -> Result<Self, StreamErr> {
-        let pos = 0;
-        let fg_skin = slice_to_lp_string(&buf[pos..])?;
+        let mut cur = DecodeCursor::new(buf);
+        let fg_skin = cur.lp_string("fg_skin")?;
         log::debug!("fg_skin: {:?}", fg_skin);
-        let pos = 2 + fg_skin.len();
-        let bg_skin = slice_to_lp_string(&buf[pos..])?;
-        let pos = pos + 2 + bg_skin.len();
+        let bg_skin = cur.lp_string("bg_skin")?;
         log::debug!("bg_skin: {:?}", bg_skin);
-        log::debug!("next bytes: {:?}", &buf[pos..(pos + 10)]);
-        let block = if buf[pos] == 0 {
-            log::debug!("block is none");
-            None
-        } else {
-            log::debug!("block is some, {:?}", &buf[pos..pos + 10]);
-            Some(BlockSpec::decode(&buf[pos + 1..])?)
-        };
+        let block = decode_flagged(&mut cur, |b: &BlockSpec| b.encoded_len, "skin block")?;
         log::debug!("read block, is_some: {:?}", block.is_some());
-        let pos = pos + 1 + block.as_ref().map(|b| b.encoded_len).unwrap_or(0);
-        let item = if buf[pos] == 0 {
-            None
-        } else {
-            Some(ItemSpec::decode(&buf[pos + 1..])?)
-        };
+        let item = decode_flagged(&mut cur, |i: &ItemSpec| i.decoded_len, "skin item")?;
         log::debug!("read item, is_some: {:?}", item.is_some());
-        let pos = pos + 1 + item.as_ref().map(|i| i.decoded_len).unwrap_or(0);
         Ok(SetSkinSpec {
             fg_skin,
             bg_skin,
             block,
             item,
-            enc_size: pos,
+            enc_size: cur.pos(),
         })
     }
 }
@@ -430,8 +367,9 @@ pub struct SkinSpec {
 
 impl MTDecode for SkinSpec {
     fn decode(buf: &[u8]) -> Result<Self, StreamErr> {
-        let path = slice_to_lp_string(&buf[0..])?;
-        let apply_type = SkinApplyType::decode(&buf[(2 + path.len())..])?;
+        let mut cur = DecodeCursor::new(buf);
+        let path = cur.lp_string("skin path")?;
+        let apply_type = SkinApplyType::decode(cur.rest())?;
         Ok(SkinSpec { path, apply_type })
     }
 }
@@ -467,58 +405,30 @@ pub enum SkinApplyType {
 
 impl MTDecode for SkinApplyType {
     fn decode(buf: &[u8]) -> Result<Self, StreamErr> {
-        let mut cur = 0;
-        let apply_type = match buf[cur] {
+        let mut cur = DecodeCursor::new(buf);
+        match cur.u8("skin apply type")? {
             0 => {
-                cur += 1;
-                let coord = [
-                    u32::from_le_bytes([buf[cur], buf[cur + 1], buf[cur + 2], buf[cur + 3]]),
-                    u32::from_le_bytes([buf[cur + 4], buf[cur + 5], buf[cur + 6], buf[cur + 7]]),
-                    u32::from_le_bytes([buf[cur + 8], buf[cur + 9], buf[cur + 10], buf[cur + 11]]),
-                ];
-                cur += 12;
-                let dir = buf[cur];
-                cur += 1;
-                let ident = slice_to_lp_string(&buf[cur..])?;
-                SkinApplyType::NormBlock { coord, dir, ident }
+                let coord = cur.u32x3("skin coord")?;
+                let dir = cur.u8("skin dir")?;
+                let ident = cur.lp_string("skin ident")?;
+                Ok(SkinApplyType::NormBlock { coord, dir, ident })
             }
             1 => {
-                cur += 1;
-                let coord = [
-                    u32::from_le_bytes([buf[cur], buf[cur + 1], buf[cur + 2], buf[cur + 3]]),
-                    u32::from_le_bytes([buf[cur + 4], buf[cur + 5], buf[cur + 6], buf[cur + 7]]),
-                    u32::from_le_bytes([buf[cur + 8], buf[cur + 9], buf[cur + 10], buf[cur + 11]]),
-                ];
-                cur += 12;
-                let dir = buf[cur];
-                cur += 1;
-                let ident = slice_to_lp_string(&buf[cur..])?;
-                SkinApplyType::GhostBlock { coord, dir, ident }
+                let coord = cur.u32x3("skin coord")?;
+                let dir = cur.u8("skin dir")?;
+                let ident = cur.lp_string("skin ident")?;
+                Ok(SkinApplyType::GhostBlock { coord, dir, ident })
             }
             2 => {
-                cur += 1;
-                let pos = [
-                    f32::from_le_bytes([buf[cur], buf[cur + 1], buf[cur + 2], buf[cur + 3]]),
-                    f32::from_le_bytes([buf[cur + 4], buf[cur + 5], buf[cur + 6], buf[cur + 7]]),
-                    f32::from_le_bytes([buf[cur + 8], buf[cur + 9], buf[cur + 10], buf[cur + 11]]),
-                ];
-                cur += 12;
-                let pyr = [
-                    f32::from_le_bytes([buf[cur], buf[cur + 1], buf[cur + 2], buf[cur + 3]]),
-                    f32::from_le_bytes([buf[cur + 4], buf[cur + 5], buf[cur + 6], buf[cur + 7]]),
-                    f32::from_le_bytes([buf[cur + 8], buf[cur + 9], buf[cur + 10], buf[cur + 11]]),
-                ];
-                cur += 12;
-                let ident = slice_to_lp_string(&buf[cur..])?;
-                SkinApplyType::FreeBlock { pos, pyr, ident }
+                let pos = cur.f32x3("skin pos")?;
+                let pyr = cur.f32x3("skin pyr")?;
+                let ident = cur.lp_string("skin ident")?;
+                Ok(SkinApplyType::FreeBlock { pos, pyr, ident })
             }
-            _ => {
-                return Err(StreamErr::InvalidData(
-                    "invalid skin apply type".to_string(),
-                ))
-            }
-        };
-        Ok(apply_type)
+            _ => Err(StreamErr::InvalidData(
+                "invalid skin apply type".to_string(),
+            )),
+        }
     }
 }
 
@@ -632,62 +542,25 @@ pub struct BlockSpec {
 
 impl MTDecode for BlockSpec {
     fn decode(buf: &[u8]) -> Result<Self, StreamErr> {
-        // log::debug!("decoding block spec");
-        let mut cur = 0;
-        let name = slice_to_lp_string(&buf[cur..])?;
-        // log::debug!("block spec name: {:?}", name);
-        cur += 2 + name.len();
-        let collection = u32::from_le_bytes([buf[cur], buf[cur + 1], buf[cur + 2], buf[cur + 3]]);
-        cur += 4;
-        let author = slice_to_lp_string(&buf[cur..])?;
-        // log::debug!("block spec author: {:?}", author);
-        cur += 2 + author.len();
-        let coord = [
-            u32::from_le_bytes([buf[cur], buf[cur + 1], buf[cur + 2], buf[cur + 3]]),
-            u32::from_le_bytes([buf[cur + 4], buf[cur + 5], buf[cur + 6], buf[cur + 7]]),
-            u32::from_le_bytes([buf[cur + 8], buf[cur + 9], buf[cur + 10], buf[cur + 11]]),
-        ];
-        cur += 12;
-        let dir = buf[cur];
-        cur += 1;
-        let dir2 = buf[cur];
-        cur += 1;
-        // log::debug!("block spec at pos");
-        let pos = [
-            f32::from_le_bytes([buf[cur], buf[cur + 1], buf[cur + 2], buf[cur + 3]]),
-            f32::from_le_bytes([buf[cur + 4], buf[cur + 5], buf[cur + 6], buf[cur + 7]]),
-            f32::from_le_bytes([buf[cur + 8], buf[cur + 9], buf[cur + 10], buf[cur + 11]]),
-        ];
-        cur += 12;
-        let pyr = [
-            f32::from_le_bytes([buf[cur], buf[cur + 1], buf[cur + 2], buf[cur + 3]]),
-            f32::from_le_bytes([buf[cur + 4], buf[cur + 5], buf[cur + 6], buf[cur + 7]]),
-            f32::from_le_bytes([buf[cur + 8], buf[cur + 9], buf[cur + 10], buf[cur + 11]]),
-        ];
-        cur += 12;
-        let color = buf[cur];
-        cur += 1;
-        let lm_qual = buf[cur];
-        cur += 1;
-        let mobil_ix = u32::from_le_bytes([buf[cur], buf[cur + 1], buf[cur + 2], buf[cur + 3]]);
-        cur += 4;
-        let mobil_variant =
-            u32::from_le_bytes([buf[cur], buf[cur + 1], buf[cur + 2], buf[cur + 3]]);
-        cur += 4;
-        let variant = u32::from_le_bytes([buf[cur], buf[cur + 1], buf[cur + 2], buf[cur + 3]]);
-        cur += 4;
-        let flags = buf[cur];
-        cur += 1;
-        // log::debug!("block spec at waypoint");
-        let waypoint = if buf[cur] == 0 {
-            None
-        } else {
-            Some(WaypointSpec::decode(&buf[cur + 1..])?)
-        };
-        cur += 1 + waypoint.as_ref().map(|w| w.decoded_len).unwrap_or(0);
-        let decoded_len = cur;
+        let mut cur = DecodeCursor::new(buf);
+        let name = cur.lp_string("block name")?;
+        let collection = cur.u32_le("block collection")?;
+        let author = cur.lp_string("block author")?;
+        let coord = cur.u32x3("block coord")?;
+        let dir = cur.u8("block dir")?;
+        let dir2 = cur.u8("block dir2")?;
+        let pos = cur.f32x3("block pos")?;
+        let pyr = cur.f32x3("block pyr")?;
+        let color = cur.u8("block color")?;
+        let lm_qual = cur.u8("block lm_qual")?;
+        let mobil_ix = cur.u32_le("block mobil_ix")?;
+        let mobil_variant = cur.u32_le("block mobil_variant")?;
+        let variant = cur.u32_le("block variant")?;
+        let flags = cur.u8("block flags")?;
+        let waypoint =
+            decode_flagged(&mut cur, |w: &WaypointSpec| w.decoded_len, "block waypoint")?;
         Ok(BlockSpec {
-            encoded_len: decoded_len,
+            encoded_len: cur.pos(),
             name,
             collection,
             author,
@@ -752,25 +625,34 @@ pub struct SetWaypointSpec {
 
 impl MTDecode for SetWaypointSpec {
     fn decode(buf: &[u8]) -> Result<Self, StreamErr> {
-        let waypoint = WaypointSpec::decode(buf)?;
-        let mut cur = waypoint.decoded_len;
-        let block = if buf[cur] == 0 {
+        let mut cur = DecodeCursor::new(buf);
+        let waypoint = WaypointSpec::decode(cur.rest())?;
+        cur.skip(waypoint.decoded_len, "waypoint")?;
+        // Preserve existing layout: a non-zero flag is the first byte of the
+        // nested spec (not skipped before decode). Dead path today.
+        cur.require(1, "waypoint block flag")?;
+        let block = if cur.rest()[0] == 0 {
+            cur.u8("waypoint block flag")?;
             None
         } else {
-            Some(BlockSpec::decode(&buf[cur..])?)
+            let block = BlockSpec::decode(cur.rest())?;
+            cur.skip(1 + block.encoded_len, "waypoint block")?;
+            Some(block)
         };
-        cur += 1 + block.as_ref().map(|b| b.encoded_len).unwrap_or(0);
-        let item = if buf[cur] == 0 {
+        cur.require(1, "waypoint item flag")?;
+        let item = if cur.rest()[0] == 0 {
+            cur.u8("waypoint item flag")?;
             None
         } else {
-            Some(ItemSpec::decode(&buf[cur..])?)
+            let item = ItemSpec::decode(cur.rest())?;
+            cur.skip(1 + item.decoded_len, "waypoint item")?;
+            Some(item)
         };
-        cur += 1 + item.as_ref().map(|i| i.decoded_len).unwrap_or(0);
         Ok(SetWaypointSpec {
             waypoint,
             block,
             item,
-            enc_size: cur,
+            enc_size: cur.pos(),
         })
     }
 }
@@ -804,13 +686,11 @@ pub struct WaypointSpec {
 
 impl MTDecode for WaypointSpec {
     fn decode(buf: &[u8]) -> Result<Self, StreamErr> {
-        let mut cur = 0;
-        let tag = slice_to_lp_string(&buf[cur..])?;
-        cur += 2 + tag.len();
-        let order = u32::from_le_bytes([buf[cur], buf[cur + 1], buf[cur + 2], buf[cur + 3]]);
-        cur += 4;
+        let mut cur = DecodeCursor::new(buf);
+        let tag = cur.lp_string("waypoint tag")?;
+        let order = cur.u32_le("waypoint order")?;
         Ok(WaypointSpec {
-            decoded_len: cur,
+            decoded_len: cur.pos(),
             tag,
             order,
         })
@@ -852,78 +732,27 @@ pub struct ItemSpec {
 
 impl MTDecode for ItemSpec {
     fn decode(buf: &[u8]) -> Result<Self, StreamErr> {
-        let mut cur = 0;
-        let name = slice_to_lp_string(&buf[cur..])?;
-        cur += 2 + name.len();
-        let collection = u32::from_le_bytes([buf[cur], buf[cur + 1], buf[cur + 2], buf[cur + 3]]);
-        cur += 4;
-        let author = slice_to_lp_string(&buf[cur..])?;
-        cur += 2 + author.len();
-        let coord = [
-            u32::from_le_bytes([buf[cur], buf[cur + 1], buf[cur + 2], buf[cur + 3]]),
-            u32::from_le_bytes([buf[cur + 4], buf[cur + 5], buf[cur + 6], buf[cur + 7]]),
-            u32::from_le_bytes([buf[cur + 8], buf[cur + 9], buf[cur + 10], buf[cur + 11]]),
-        ];
-        cur += 12;
-        let dir = buf[cur] as i8;
-        cur += 1;
-        let pos = [
-            f32::from_le_bytes([buf[cur], buf[cur + 1], buf[cur + 2], buf[cur + 3]]),
-            f32::from_le_bytes([buf[cur + 4], buf[cur + 5], buf[cur + 6], buf[cur + 7]]),
-            f32::from_le_bytes([buf[cur + 8], buf[cur + 9], buf[cur + 10], buf[cur + 11]]),
-        ];
-        cur += 12;
-        let pyr = [
-            f32::from_le_bytes([buf[cur], buf[cur + 1], buf[cur + 2], buf[cur + 3]]),
-            f32::from_le_bytes([buf[cur + 4], buf[cur + 5], buf[cur + 6], buf[cur + 7]]),
-            f32::from_le_bytes([buf[cur + 8], buf[cur + 9], buf[cur + 10], buf[cur + 11]]),
-        ];
-        cur += 12;
-        let scale = f32::from_le_bytes([buf[cur], buf[cur + 1], buf[cur + 2], buf[cur + 3]]);
-        cur += 4;
-        let color = buf[cur];
-        cur += 1;
-        let lm_qual = buf[cur];
-        cur += 1;
-        let phase = buf[cur];
-        cur += 1;
-        let visual_rot = [
-            f32::from_le_bytes([buf[cur], buf[cur + 1], buf[cur + 2], buf[cur + 3]]),
-            f32::from_le_bytes([buf[cur + 4], buf[cur + 5], buf[cur + 6], buf[cur + 7]]),
-            f32::from_le_bytes([buf[cur + 8], buf[cur + 9], buf[cur + 10], buf[cur + 11]]),
-            f32::from_le_bytes([buf[cur + 12], buf[cur + 13], buf[cur + 14], buf[cur + 15]]),
-            f32::from_le_bytes([buf[cur + 16], buf[cur + 17], buf[cur + 18], buf[cur + 19]]),
-            f32::from_le_bytes([buf[cur + 20], buf[cur + 21], buf[cur + 22], buf[cur + 23]]),
-            f32::from_le_bytes([buf[cur + 24], buf[cur + 25], buf[cur + 26], buf[cur + 27]]),
-            f32::from_le_bytes([buf[cur + 28], buf[cur + 29], buf[cur + 30], buf[cur + 31]]),
-            f32::from_le_bytes([buf[cur + 32], buf[cur + 33], buf[cur + 34], buf[cur + 35]]),
-        ];
-        cur += 36;
-        let pivot_pos = [
-            f32::from_le_bytes([buf[cur], buf[cur + 1], buf[cur + 2], buf[cur + 3]]),
-            f32::from_le_bytes([buf[cur + 4], buf[cur + 5], buf[cur + 6], buf[cur + 7]]),
-            f32::from_le_bytes([buf[cur + 8], buf[cur + 9], buf[cur + 10], buf[cur + 11]]),
-        ];
-        cur += 12;
-        let is_flying = buf[cur];
-        cur += 1;
-        let variant_ix = u16::from_le_bytes([buf[cur], buf[cur + 1]]);
-        cur += 2;
-        let associated_block_ix =
-            u32::from_le_bytes([buf[cur], buf[cur + 1], buf[cur + 2], buf[cur + 3]]);
-        cur += 4;
-        let item_group_on_block =
-            u32::from_le_bytes([buf[cur], buf[cur + 1], buf[cur + 2], buf[cur + 3]]);
-        cur += 4;
-        let waypoint = if buf[cur] == 0 {
-            None
-        } else {
-            Some(WaypointSpec::decode(&buf[cur + 1..])?)
-        };
-        cur += 1 + waypoint.as_ref().map(|w| w.decoded_len).unwrap_or(0);
-        let decoded_len = cur;
+        let mut cur = DecodeCursor::new(buf);
+        let name = cur.lp_string("item name")?;
+        let collection = cur.u32_le("item collection")?;
+        let author = cur.lp_string("item author")?;
+        let coord = cur.u32x3("item coord")?;
+        let dir = cur.i8("item dir")?;
+        let pos = cur.f32x3("item pos")?;
+        let pyr = cur.f32x3("item pyr")?;
+        let scale = cur.f32_le("item scale")?;
+        let color = cur.u8("item color")?;
+        let lm_qual = cur.u8("item lm_qual")?;
+        let phase = cur.u8("item phase")?;
+        let visual_rot = cur.f32x9("item visual_rot")?;
+        let pivot_pos = cur.f32x3("item pivot_pos")?;
+        let is_flying = cur.u8("item is_flying")?;
+        let variant_ix = cur.u16_le("item variant_ix")?;
+        let associated_block_ix = cur.u32_le("item associated_block_ix")?;
+        let item_group_on_block = cur.u32_le("item item_group_on_block")?;
+        let waypoint = decode_flagged(&mut cur, |w: &WaypointSpec| w.decoded_len, "item waypoint")?;
         Ok(ItemSpec {
-            decoded_len,
+            decoded_len: cur.pos(),
             name,
             collection,
             author,
@@ -1151,6 +980,153 @@ mod tests {
         match err {
             StreamErr::InvalidData(_) | StreamErr::Io(_) => {}
             other => panic!("expected InvalidData or Io, got {other:?}"),
+        }
+    }
+
+    fn assert_invalid(buf: &[u8], why: &str) {
+        match MacroblockSpec::decode(buf) {
+            Err(StreamErr::InvalidData(_)) | Err(StreamErr::Io(_)) => {}
+            Err(other) => panic!("{why}: expected InvalidData or Io, got {other:?}"),
+            Ok(_) => panic!("{why}: expected Err"),
+        }
+    }
+
+    #[test]
+    fn leftover_after_valid_trns_is_invalid() {
+        let spec = MacroblockSpec {
+            blocks: vec![],
+            items: vec![],
+            terrains: vec![sample_terrain()],
+        };
+        let mut buf = spec.encode();
+        buf.push(0xFF);
+        assert_invalid(&buf, "byte after a complete TRNs chunk");
+    }
+
+    #[test]
+    fn leftover_after_empty_trns_is_invalid() {
+        let mut input = empty_pre_terrain_payload();
+        input.extend_from_slice(b"TRNs");
+        input.extend_from_slice(&0u16.to_le_bytes());
+        input.push(0x00);
+        assert_invalid(&input, "byte after empty TRNs");
+    }
+
+    #[test]
+    fn two_terrain_cells_roundtrip() {
+        let mut second = sample_terrain();
+        second.offset = [4, -1, 8];
+        second.dir = 3;
+        second.base_height = -8;
+        second.bottom_height = -8;
+        second.top_height = 16;
+        let spec = MacroblockSpec {
+            blocks: vec![],
+            items: vec![],
+            terrains: vec![sample_terrain(), second.clone()],
+        };
+        let encoded = spec.encode();
+        let decoded = MacroblockSpec::decode(&encoded).expect("two cells");
+        assert_eq!(decoded.terrains.len(), 2);
+        assert_eq!(decoded.terrains[0], sample_terrain());
+        assert_eq!(decoded.terrains[1], second);
+        assert_eq!(decoded.encode(), encoded);
+    }
+
+    #[test]
+    fn zero_zone_terrain_roundtrip() {
+        let cell = TerrainSpec {
+            offset: [1, 2, 3],
+            zones: vec![],
+            current_index: 0,
+            dir: 0,
+            base_height: -4,
+            bottom_height: -4,
+            top_height: 0,
+        };
+        let spec = MacroblockSpec {
+            blocks: vec![],
+            items: vec![],
+            terrains: vec![cell.clone()],
+        };
+        let encoded = spec.encode();
+        // Independent layout: offset 12 + zone_count 1 + trailer 20 = 33, plus TRNs/u16.
+        let mut expected = empty_pre_terrain_payload();
+        expected.extend_from_slice(b"TRNs");
+        expected.extend_from_slice(&1u16.to_le_bytes());
+        expected.extend_from_slice(&1i32.to_le_bytes());
+        expected.extend_from_slice(&2i32.to_le_bytes());
+        expected.extend_from_slice(&3i32.to_le_bytes());
+        expected.push(0u8);
+        expected.extend_from_slice(&0u32.to_le_bytes());
+        expected.extend_from_slice(&0u32.to_le_bytes());
+        expected.extend_from_slice(&(-4i32).to_le_bytes());
+        expected.extend_from_slice(&(-4i32).to_le_bytes());
+        expected.extend_from_slice(&0i32.to_le_bytes());
+        assert_eq!(encoded, expected);
+        let decoded = MacroblockSpec::decode(&encoded).expect("zero-zone cell");
+        assert_eq!(decoded.terrains, vec![cell]);
+    }
+
+    #[test]
+    fn short_or_empty_buffer_is_invalid_without_panic() {
+        assert_invalid(&[], "empty buffer");
+        assert_invalid(&[b'B', b'L', b'K'], "truncated BLKs magic");
+        let mut almost = empty_pre_terrain_payload();
+        almost.truncate(almost.len() - 1);
+        assert_invalid(&almost, "truncated item count");
+    }
+
+    #[test]
+    fn skins_count_nonzero_is_invalid() {
+        let mut input = Vec::new();
+        input.extend_from_slice(b"BLKs");
+        input.extend_from_slice(&0u16.to_le_bytes());
+        input.extend_from_slice(b"SKNs");
+        input.extend_from_slice(&1u16.to_le_bytes());
+        input.extend_from_slice(b"ITMs");
+        input.extend_from_slice(&0u16.to_le_bytes());
+        let err = MacroblockSpec::decode(&input).expect_err("skins");
+        match err {
+            StreamErr::InvalidData(msg) => assert!(msg.contains("skins")),
+            other => panic!("expected InvalidData, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn truncated_zone_name_is_invalid_without_panic() {
+        let mut input = empty_pre_terrain_payload();
+        input.extend_from_slice(b"TRNs");
+        input.extend_from_slice(&1u16.to_le_bytes());
+        input.extend_from_slice(&0i32.to_le_bytes());
+        input.extend_from_slice(&0i32.to_le_bytes());
+        input.extend_from_slice(&0i32.to_le_bytes());
+        input.push(1u8); // one zone
+        input.extend_from_slice(&10u16.to_le_bytes());
+        input.extend_from_slice(b"Voi"); // 3 of 10 name bytes
+        assert_invalid(&input, "truncated zone name");
+    }
+
+    #[test]
+    fn wrong_leading_magic_is_invalid() {
+        let mut input = empty_pre_terrain_payload();
+        input[0..4].copy_from_slice(b"NOPE");
+        assert_invalid(&input, "wrong BLKs magic");
+    }
+
+    #[test]
+    fn nested_specs_short_buffer_is_invalid_without_panic() {
+        match BlockSpec::decode(&[]) {
+            Err(StreamErr::InvalidData(_)) | Err(StreamErr::Io(_)) => {}
+            other => panic!("BlockSpec: {other:?}"),
+        }
+        match ItemSpec::decode(&[1, 0, b'x']) {
+            Err(StreamErr::InvalidData(_)) | Err(StreamErr::Io(_)) => {}
+            other => panic!("ItemSpec: {other:?}"),
+        }
+        match WaypointSpec::decode(&[]) {
+            Err(StreamErr::InvalidData(_)) | Err(StreamErr::Io(_)) => {}
+            other => panic!("WaypointSpec: {other:?}"),
         }
     }
 }

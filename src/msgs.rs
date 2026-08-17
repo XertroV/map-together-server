@@ -1,11 +1,14 @@
 extern crate rand;
 
+use rand::{
+    distributions::{Distribution, Standard},
+    Rng,
+};
 use serde::{Deserialize, Serialize};
-use rand::{distributions::{Distribution, Standard}, Rng};
 
-use crate::*;
-use crate::mt_codec::*;
 use crate::managers::*;
+use crate::mt_codec::*;
+use crate::*;
 
 pub const INIT_MSG_ROOM_CREATE: u8 = 1;
 pub const INIT_MSG_ROOM_JOIN: u8 = 2;
@@ -60,29 +63,29 @@ impl MTEncode for RoomCreationDeets {
 
 impl MTDecode for RoomCreationDeets {
     fn decode(buf: &[u8]) -> Result<Self, StreamErr> {
-        if buf.len() < 15 {
-            return Err(StreamErr::InvalidData(format!("RoomCreationDeets: not enough data, expected 15 bytes, got {}", buf.len())));
-        }
-        let password = slice_to_lp_string(&buf)?;
-        let mut idx = 2 + password.len();
-        let action_rate_limit = u32::from_le_bytes([buf[idx], buf[idx + 1], buf[idx + 2], buf[idx + 3]]);
-        idx += 4;
-        let mut map_size = [0; 3];
-        for i in 0..3 {
-            map_size[i] = buf[idx + i];
-        }
-        idx += 3;
-        let map_base = buf[idx];
-        idx += 1;
-        let base_car = buf[idx];
-        idx += 1;
-        let rules_flags = buf[idx];
-        idx += 1;
-        let item_max_size = u32::from_le_bytes([buf[idx], buf[idx + 1], buf[idx + 2], buf[idx + 3]]);
-        idx += 4;
-        let player_limit = u16::from_le_bytes([buf[idx], buf[idx + 1]]);
-        idx += 2;
-        Ok(Self { password, action_rate_limit, map_size, map_base, base_car, rules_flags, item_max_size, player_limit })
+        let mut cur = DecodeCursor::new(buf);
+        let password = cur.lp_string("room password")?;
+        let action_rate_limit = cur.u32_le("action_rate_limit")?;
+        let map_size = [
+            cur.u8("map_size")?,
+            cur.u8("map_size")?,
+            cur.u8("map_size")?,
+        ];
+        let map_base = cur.u8("map_base")?;
+        let base_car = cur.u8("base_car")?;
+        let rules_flags = cur.u8("rules_flags")?;
+        let item_max_size = cur.u32_le("item_max_size")?;
+        let player_limit = cur.u16_le("player_limit")?;
+        Ok(Self {
+            password,
+            action_rate_limit,
+            map_size,
+            map_base,
+            base_car,
+            rules_flags,
+            item_max_size,
+            player_limit,
+        })
     }
 }
 
@@ -125,12 +128,6 @@ pub fn str_to_room_id(s: &str) -> Option<u64> {
     Some(id)
 }
 
-
-
-
-
-
-
 #[derive(Debug, Clone)]
 pub struct PlayerVehiclePos {
     pub mat: [[f32; 3]; 4],
@@ -170,22 +167,12 @@ impl MTEncode for PlayerVehiclePos {
 
 impl MTDecode for PlayerVehiclePos {
     fn decode(buf: &[u8]) -> Result<Self, StreamErr> {
-        if buf.len() < 48 {
-            return Err(StreamErr::InvalidData(format!("PlayerVehiclePos: not enough data, expected 48 bytes, got {}", buf.len())));
-        }
+        let mut cur = DecodeCursor::new(buf);
         let mut mat = [[0.0; 3]; 4];
-        let mut idx = 0;
         for i in 0..4 {
-            for j in 0..3 {
-                mat[i][j] = f32::from_le_bytes([buf[idx], buf[idx + 1], buf[idx + 2], buf[idx + 3]]);
-                idx += 4;
-            }
+            mat[i] = cur.f32x3("vehicle mat")?;
         }
-        let mut vel = [0.0; 3];
-        for i in 0..3 {
-            vel[i] = f32::from_le_bytes([buf[idx], buf[idx + 1], buf[idx + 2], buf[idx + 3]]);
-            idx += 4;
-        }
+        let vel = cur.f32x3("vehicle vel")?;
         Ok(Self { mat, vel })
     }
 }
@@ -207,7 +194,11 @@ impl Distribution<PlayerCamCursor> for Standard {
         }
         let target = (rng.gen(), rng.gen(), rng.gen());
         let cursor = rng.gen();
-        PlayerCamCursor { cam_matrix, target, cursor }
+        PlayerCamCursor {
+            cam_matrix,
+            target,
+            cursor,
+        }
     }
 }
 
@@ -229,25 +220,19 @@ impl MTEncode for PlayerCamCursor {
 
 impl MTDecode for PlayerCamCursor {
     fn decode(buf: &[u8]) -> Result<Self, StreamErr> {
-        if buf.len() < 60 {
-            return Err(StreamErr::InvalidData(format!("PlayerCamCursor: not enough data, expected 60 bytes, got {}", buf.len())));
-        }
+        let mut cur = DecodeCursor::new(buf);
         let mut cam_matrix = [[0.0; 3]; 4];
-        let mut idx = 0;
         for i in 0..4 {
-            for j in 0..3 {
-                cam_matrix[i][j] = f32::from_le_bytes([buf[idx], buf[idx + 1], buf[idx + 2], buf[idx + 3]]);
-                idx += 4;
-            }
+            cam_matrix[i] = cur.f32x3("cam matrix")?;
         }
-        let target = (
-            f32::from_le_bytes([buf[idx], buf[idx + 1], buf[idx + 2], buf[idx + 3]]),
-            f32::from_le_bytes([buf[idx + 4], buf[idx + 5], buf[idx + 6], buf[idx + 7]]),
-            f32::from_le_bytes([buf[idx + 8], buf[idx + 9], buf[idx + 10], buf[idx + 11]]),
-        );
-        idx += 12;
-        let cursor = Cursor::decode(&buf[idx..])?;
-        Ok(Self { target, cam_matrix, cursor })
+        let t = cur.f32x3("cam target")?;
+        let target = (t[0], t[1], t[2]);
+        let cursor = Cursor::decode(cur.rest())?;
+        Ok(Self {
+            target,
+            cam_matrix,
+            cursor,
+        })
     }
 }
 
@@ -259,7 +244,6 @@ pub struct Cursor {
     pub coords: [u32; 3],
     pub pos: [f32; 3],
 }
-
 
 fn generate_rand_string(len: usize) -> String {
     const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyz";
@@ -306,24 +290,39 @@ impl MTEncode for Cursor {
 
 impl MTDecode for Cursor {
     fn decode(buf: &[u8]) -> Result<Self, StreamErr> {
-        if buf.len() < 19 {
-            return Err(StreamErr::InvalidData(format!("Cursor: not enough data, expected 19 bytes, got {}", buf.len())));
+        let mut cur = DecodeCursor::new(buf);
+        let edit_mode = cur.u8("edit_mode")?;
+        let place_mode = cur.u8("place_mode")?;
+        let cur_obj = cur.lp_string("cur_obj")?;
+        let coords = cur.u32x3("cursor coords")?;
+        let pos = cur.f32x3("cursor pos")?;
+        Ok(Self {
+            edit_mode,
+            place_mode,
+            cur_obj,
+            coords,
+            pos,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vehicle_pos_short_buffer_is_invalid_without_panic() {
+        match PlayerVehiclePos::decode(&[0u8; 10]) {
+            Err(StreamErr::InvalidData(_)) => {}
+            other => panic!("{other:?}"),
         }
-        let edit_mode = buf[0];
-        let place_mode = buf[1];
-        let mut idx = 2;
-        let cur_obj = slice_to_lp_string(&buf[idx..])?;
-        idx += 2 + cur_obj.len();
-        let mut coords = [0; 3];
-        for i in 0..3 {
-            coords[i] = u32::from_le_bytes([buf[idx], buf[idx + 1], buf[idx + 2], buf[idx + 3]]);
-            idx += 4;
+    }
+
+    #[test]
+    fn editor_cursor_short_buffer_is_invalid_without_panic() {
+        match Cursor::decode(&[]) {
+            Err(StreamErr::InvalidData(_)) => {}
+            other => panic!("{other:?}"),
         }
-        let mut pos = [0.0; 3];
-        for i in 0..3 {
-            pos[i] = f32::from_le_bytes([buf[idx], buf[idx + 1], buf[idx + 2], buf[idx + 3]]);
-            idx += 4;
-        }
-        Ok(Self { edit_mode, place_mode, cur_obj, coords, pos })
     }
 }
