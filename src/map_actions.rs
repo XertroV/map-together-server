@@ -1129,4 +1129,70 @@ mod tests {
             other => panic!("WaypointSpec: {other:?}"),
         }
     }
+
+    /// Hand-built empty-ish block: name "A", collection 26, empty author, zeros, no waypoint.
+    fn minimal_block_bytes() -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.push(b'A');
+        b.extend_from_slice(&26u32.to_le_bytes());
+        b.extend_from_slice(&0u16.to_le_bytes());
+        b.extend_from_slice(&[0u8; 12]); // coord
+        b.push(0);
+        b.push(0);
+        b.extend_from_slice(&[0u8; 12]); // pos
+        b.extend_from_slice(&[0u8; 12]); // pyr
+        b.push(0);
+        b.push(0);
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.push(0); // flags
+        b.push(0); // no waypoint
+        b
+    }
+
+    #[test]
+    fn block_plus_terrain_roundtrip() {
+        let block = BlockSpec::decode(&minimal_block_bytes()).expect("minimal block");
+        let spec = MacroblockSpec {
+            blocks: vec![block],
+            items: vec![],
+            terrains: vec![sample_terrain()],
+        };
+        let encoded = spec.encode();
+        let decoded = MacroblockSpec::decode(&encoded).expect("block+terrain");
+        assert_eq!(decoded.blocks.len(), 1);
+        assert!(decoded.items.is_empty());
+        assert_eq!(decoded.terrains, vec![sample_terrain()]);
+        assert_eq!(decoded.encode(), encoded);
+        assert!(
+            encoded.windows(4).any(|w| w == b"TRNs"),
+            "mixed payload must carry TRNs"
+        );
+    }
+
+    #[test]
+    fn waypoint_roundtrip() {
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&2u16.to_le_bytes());
+        raw.extend_from_slice(b"cp");
+        raw.extend_from_slice(&3u32.to_le_bytes());
+        let wp = WaypointSpec::decode(&raw).expect("waypoint");
+        assert_eq!(wp.tag, "cp");
+        assert_eq!(wp.order, 3);
+        assert_eq!(wp.encode(), raw);
+    }
+
+    #[test]
+    fn wrong_skins_magic_after_blocks_is_invalid() {
+        let mut input = Vec::new();
+        input.extend_from_slice(b"BLKs");
+        input.extend_from_slice(&0u16.to_le_bytes());
+        input.extend_from_slice(b"XXXX");
+        input.extend_from_slice(&0u16.to_le_bytes());
+        input.extend_from_slice(b"ITMs");
+        input.extend_from_slice(&0u16.to_le_bytes());
+        assert_invalid(&input, "wrong SKNs magic");
+    }
 }

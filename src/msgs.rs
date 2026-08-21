@@ -325,4 +325,12 @@ mod tests {
             other => panic!("{other:?}"),
         }
     }
+
+    #[test]
+    fn room_creation_deets_short_buffer_is_invalid_without_panic() {
+        match RoomCreationDeets::decode(&[0u8; 4]) {
+            Err(StreamErr::InvalidData(_)) | Err(StreamErr::Io(_)) => {}
+            other => panic!("{other:?}"),
+        }
+    }
 }

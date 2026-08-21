@@ -150,4 +150,16 @@ mod tests {
         let mut cur = DecodeCursor::new(&[5, 0, b'a']);
         assert!(matches!(cur.lp_string("s"), Err(StreamErr::InvalidData(_))));
     }
+
+    #[test]
+    fn lp_string_rejects_overlong() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&10001u16.to_le_bytes());
+        buf.extend_from_slice(&vec![b'x'; 8]);
+        let mut cur = DecodeCursor::new(&buf);
+        assert!(matches!(
+            cur.lp_string("s"),
+            Err(StreamErr::InvalidData(_))
+        ));
+    }
 }
