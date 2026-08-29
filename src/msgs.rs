@@ -321,9 +321,78 @@ impl MTDecode for Cursor {
     }
 }
 
+/// Test-mode announce (v7+): a player entered/left editor test mode. On enter
+/// it carries their car-skin url (may be empty for the default skin).
+#[derive(Debug, Clone)]
+pub struct PlayerTestMode {
+    pub entering: bool,
+    pub skin_url: String,
+}
+
+impl MTEncode for PlayerTestMode {
+    fn encode(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.push(self.entering as u8);
+        write_lp_string_to_buf(&mut buf, &self.skin_url);
+        buf
+    }
+}
+
+impl MTDecode for PlayerTestMode {
+    fn decode(buf: &[u8]) -> Result<Self, StreamErr> {
+        let mut cur = DecodeCursor::new(buf);
+        let entering = cur.u8("test_mode entering")? != 0;
+        let skin_url = cur.lp_string("test_mode skin_url")?;
+        Ok(Self { entering, skin_url })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn player_test_mode_roundtrip_and_layout() {
+        let msg = PlayerTestMode {
+            entering: true,
+            skin_url: "https://example.com/skin.zip".into(),
+        };
+        let enc = msg.encode();
+        let mut expected = vec![1u8];
+        expected.extend_from_slice(&28u16.to_le_bytes());
+        expected.extend_from_slice(b"https://example.com/skin.zip");
+        assert_eq!(enc, expected, "encode must match the published layout");
+        let dec = PlayerTestMode::decode(&enc).expect("decode");
+        assert!(dec.entering);
+        assert_eq!(dec.skin_url, msg.skin_url);
+    }
+
+    #[test]
+    fn player_test_mode_leave_is_three_bytes() {
+        let msg = PlayerTestMode {
+            entering: false,
+            skin_url: String::new(),
+        };
+        assert_eq!(msg.encode(), vec![0u8, 0, 0]);
+        let dec = PlayerTestMode::decode(&[0, 0, 0]).expect("decode leave");
+        assert!(!dec.entering);
+        assert!(dec.skin_url.is_empty());
+    }
+
+    #[test]
+    fn player_test_mode_short_buffer_is_invalid_without_panic() {
+        for n in 0..3 {
+            match PlayerTestMode::decode(&[1u8, 5, 0][..n]) {
+                Err(StreamErr::InvalidData(_)) => {}
+                other => panic!("expected InvalidData for {n} bytes, got {other:?}"),
+            }
+        }
+        // length prefix promises more bytes than are present
+        match PlayerTestMode::decode(&[1u8, 5, 0, b'x']) {
+            Err(StreamErr::InvalidData(_)) => {}
+            other => panic!("{other:?}"),
+        }
+    }
 
     #[test]
     fn vehicle_pos_short_buffer_is_invalid_without_panic() {

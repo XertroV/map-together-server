@@ -17,10 +17,10 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::map_actions::{
-    MacroblockSpec, MapAction, PlayerID, SetSkinSpec, SkinSpec, WaypointSpec, MAPPING_MSG_ALERT_STATUS_TO_ALL, MAPPING_MSG_BAN_PLAYER, MAPPING_MSG_CHANGE_ADMIN, MAPPING_MSG_CHAT_MSG, MAPPING_MSG_DELETE, MAPPING_MSG_DEMOTE_MOD, MAPPING_MSG_KICK_PLAYER, MAPPING_MSG_PING, MAPPING_MSG_PLACE, MAPPING_MSG_PLAYER_CAMCURSOR, MAPPING_MSG_PLAYER_JOIN, MAPPING_MSG_PLAYER_LEAVE, MAPPING_MSG_PLAYER_VEHICLEPOS, MAPPING_MSG_PROMOTE_MOD, MAPPING_MSG_RESYNC, MAPPING_MSG_SERVER_STATS, MAPPING_MSG_SET_ACTION_LIMIT, MAPPING_MSG_SET_MAPNAME, MAPPING_MSG_SET_ROOM_PLAYER_LIMIT, MAPPING_MSG_SET_SKIN, MAPPING_MSG_SET_VARIABLE, MAPPING_MSG_SET_WAYPOINT
+    MacroblockSpec, MapAction, PlayerID, SetSkinSpec, SkinSpec, WaypointSpec, MAPPING_MSG_ALERT_STATUS_TO_ALL, MAPPING_MSG_BAN_PLAYER, MAPPING_MSG_CHANGE_ADMIN, MAPPING_MSG_CHAT_MSG, MAPPING_MSG_DELETE, MAPPING_MSG_DEMOTE_MOD, MAPPING_MSG_KICK_PLAYER, MAPPING_MSG_PING, MAPPING_MSG_PLACE, MAPPING_MSG_PLAYER_CAMCURSOR, MAPPING_MSG_PLAYER_JOIN, MAPPING_MSG_PLAYER_LEAVE, MAPPING_MSG_PLAYER_TEST_MODE, MAPPING_MSG_PLAYER_VEHICLEPOS, MAPPING_MSG_PROMOTE_MOD, MAPPING_MSG_RESYNC, MAPPING_MSG_SERVER_STATS, MAPPING_MSG_SET_ACTION_LIMIT, MAPPING_MSG_SET_MAPNAME, MAPPING_MSG_SET_ROOM_PLAYER_LIMIT, MAPPING_MSG_SET_SKIN, MAPPING_MSG_SET_VARIABLE, MAPPING_MSG_SET_WAYPOINT
 };
 use crate::msgs::{
-    generate_room_id, room_id_to_str, str_to_room_id, PlayerCamCursor, PlayerVehiclePos, RoomConnectionDeets, RoomCreationDeets, RoomMsg
+    generate_room_id, room_id_to_str, str_to_room_id, PlayerCamCursor, PlayerTestMode, PlayerVehiclePos, RoomConnectionDeets, RoomCreationDeets, RoomMsg
 };
 use crate::mt_codec::{MTDecode, MTEncode};
 use crate::player_loop::run_player_loop;
@@ -34,15 +34,20 @@ pub type ActionDescArc = Arc<ActionDesc>;
 pub const VERSION_BYTES_V5: [u8; 3] = [0xFF as u8, 0x05, 0x80];
 /// Protocol v6: `map_base` bits 2-4 carry the map environment (see `RoomCreationDeets::map_env`).
 pub const VERSION_BYTES_V6: [u8; 3] = [0xFF as u8, 0x06, 0x80];
+/// Protocol v7: adds the ephemeral `PlayerTestMode` message (test-mode
+/// enter/leave + car-skin url). Only relayed to v7+ clients (see the
+/// `min_proto_version` gate in `run_player_loop`).
+pub const VERSION_BYTES_V7: [u8; 3] = [0xFF as u8, 0x07, 0x80];
 /// What our own clients/bots send. Older versions are still accepted on connect;
 /// see `client_proto_version` and the env gate in `manage_room`.
-pub const CURR_VERSION_BYTES: [u8; 3] = VERSION_BYTES_V6;
+pub const CURR_VERSION_BYTES: [u8; 3] = VERSION_BYTES_V7;
 
 /// Map a client's version bytes to a protocol version number, or None if unsupported.
 pub fn client_proto_version(ver_buf: &[u8; 3]) -> Option<u8> {
     match *ver_buf {
         VERSION_BYTES_V5 => Some(5),
         VERSION_BYTES_V6 => Some(6),
+        VERSION_BYTES_V7 => Some(7),
         _ => None,
     }
 }
@@ -61,6 +66,9 @@ pub struct Player {
     pub action_tx: Sender<ActionDescArc>,
     pub shutdown_tx: Sender<()>,
     pub shutdown_rx: RwLock<Option<Receiver<()>>>,
+    /// Negotiated protocol version; set in `manage_room` before the player
+    /// joins a room (0 until then). Gates which message types we relay.
+    pub proto_version: u8,
 }
 
 impl Player {
@@ -76,6 +84,7 @@ impl Player {
             action_tx,
             shutdown_tx,
             shutdown_rx: RwLock::new(Some(shutdown_rx)),
+            proto_version: 0,
         }, action_rx)
     }
 
@@ -321,6 +330,10 @@ impl Player {
                 stream.write_all(&buf).await?;
                 write_pid_and_timestamp(stream, pid, time).await?;
             }
+            MapAction::PlayerTestMode(tm) => {
+                write_encodable_msg_full(stream, MAPPING_MSG_PLAYER_TEST_MODE, tm, pid, time)
+                    .await?
+            }
         }
         Ok(())
     }
@@ -453,6 +466,13 @@ impl Player {
                 let mut buf = vec![0u8; len as usize];
                 stream.read_exact(&mut buf).await?;
                 Ok(MapAction::VehiclePos(PlayerVehiclePos::decode(&buf)?))
+            }
+            MAPPING_MSG_PLAYER_TEST_MODE => {
+                // test-mode enter/leave + car-skin url
+                let len = read_checked_msg_u32_len(stream).await?;
+                let mut buf = vec![0u8; len as usize];
+                stream.read_exact(&mut buf).await?;
+                Ok(MapAction::PlayerTestMode(PlayerTestMode::decode(&buf)?))
             }
             MAPPING_MSG_SET_ACTION_LIMIT => {
                 // set action limit
@@ -924,6 +944,7 @@ impl RoomManager {
 
         // (version bytes already consumed by read_exact above)
         drop(rx);
+        player.proto_version = proto_version;
 
         // read commands from player.stream
         match player.read_room_msg().await {

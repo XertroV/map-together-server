@@ -38,6 +38,11 @@ pub async fn run_player_loop(player: Arc<Player>, room: Arc<Room>, mut action_rx
                     break;
                 },
                 Some(action) => {
+                    // Never relay a message type this client is too old to
+                    // parse — old clients crash on unknown message types.
+                    if p.proto_version < action.0.min_proto_version() {
+                        continue;
+                    }
                     match Player::write_action(&mut *p.stream_w.write().await, &action.0, &action.1, action.2, &action.3).await {
                         Ok(_) => {}
                         Err(e) => {

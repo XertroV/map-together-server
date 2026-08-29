@@ -50,6 +50,7 @@ pub const MAPPING_MSG_ALERT_STATUS_TO_ALL: u8 = 19;
 pub const MAPPING_MSG_CHAT_MSG: u8 = 20;
 pub const MAPPING_MSG_PING: u8 = 21;
 pub const MAPPING_MSG_SERVER_STATS: u8 = 22;
+pub const MAPPING_MSG_PLAYER_TEST_MODE: u8 = 23;
 
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone)]
@@ -84,18 +85,32 @@ pub enum MapAction {
     Ping(),
     /// players connected, response to ping
     ServerStats(u32),
+    /// test-mode enter/leave + car-skin url (ephemeral; v7+ only)
+    PlayerTestMode(PlayerTestMode),
 }
 
 impl MapAction {
     pub fn is_ephemeral(&self) -> bool {
         matches!(
             self,
-            MapAction::PlayerCamCursor(_) | MapAction::VehiclePos(_)
+            MapAction::PlayerCamCursor(_)
+                | MapAction::VehiclePos(_)
+                | MapAction::PlayerTestMode(_)
         )
     }
 
     pub fn is_ping(&self) -> bool {
         matches!(self, MapAction::Ping())
+    }
+
+    /// Minimum client protocol version that understands this message type.
+    /// Older clients crash on unknown message types, so the write loop drops
+    /// any action its recipient is too old for (see `run_player_loop`).
+    pub fn min_proto_version(&self) -> u8 {
+        match self {
+            MapAction::PlayerTestMode(_) => 7,
+            _ => 0,
+        }
     }
 
     pub fn get_type(&self) -> &'static str {
@@ -122,6 +137,7 @@ impl MapAction {
             MapAction::ChatMsg(_, _) => "ChatMsg",
             MapAction::Ping() => "Ping",
             MapAction::ServerStats(_) => "ServerStats",
+            MapAction::PlayerTestMode(_) => "PlayerTestMode",
         }
     }
 }
@@ -1182,6 +1198,31 @@ mod tests {
         assert_eq!(wp.tag, "cp");
         assert_eq!(wp.order, 3);
         assert_eq!(wp.encode(), raw);
+    }
+
+    #[test]
+    fn player_test_mode_action_flags() {
+        let a = MapAction::PlayerTestMode(PlayerTestMode {
+            entering: true,
+            skin_url: String::new(),
+        });
+        assert!(a.is_ephemeral());
+        assert_eq!(a.min_proto_version(), 7);
+        assert_eq!(a.get_type(), "PlayerTestMode");
+        assert_eq!(MAPPING_MSG_PLAYER_TEST_MODE, 23);
+        // pre-v7 message types stay ungated
+        assert_eq!(MapAction::Ping().min_proto_version(), 0);
+        assert_eq!(MapAction::ServerStats(3).min_proto_version(), 0);
+    }
+
+    #[test]
+    fn proto_version_bytes_mapping() {
+        assert_eq!(client_proto_version(&VERSION_BYTES_V5), Some(5));
+        assert_eq!(client_proto_version(&VERSION_BYTES_V6), Some(6));
+        assert_eq!(client_proto_version(&VERSION_BYTES_V7), Some(7));
+        assert_eq!(client_proto_version(&CURR_VERSION_BYTES), Some(7));
+        assert_eq!(client_proto_version(&[0xFF, 0x04, 0x80]), None);
+        assert_eq!(client_proto_version(&[0x00, 0x07, 0x80]), None);
     }
 
     #[test]
