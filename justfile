@@ -25,3 +25,8 @@ test:
 # Type-check without building binaries.
 check:
     cargo check -j2
+
+# Wait for 0 player connections for N min (default 10), then restart the dev
+# service to pick up a new binary. 30+ min is provably lossless (room TTL).
+restart-when-idle *args:
+    ./restart-when-idle.sh {{ args }}
