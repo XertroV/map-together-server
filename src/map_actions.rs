@@ -108,7 +108,7 @@ impl MapAction {
     /// any action its recipient is too old for (see `run_player_loop`).
     pub fn min_proto_version(&self) -> u8 {
         match self {
-            MapAction::PlayerTestMode(_) => 7,
+            MapAction::PlayerTestMode(_) => 6,
             _ => 0,
         }
     }
@@ -1207,10 +1207,10 @@ mod tests {
             skin_url: String::new(),
         });
         assert!(a.is_ephemeral());
-        assert_eq!(a.min_proto_version(), 7);
+        assert_eq!(a.min_proto_version(), 6);
         assert_eq!(a.get_type(), "PlayerTestMode");
         assert_eq!(MAPPING_MSG_PLAYER_TEST_MODE, 23);
-        // pre-v7 message types stay ungated
+        // pre-v6 message types stay ungated
         assert_eq!(MapAction::Ping().min_proto_version(), 0);
         assert_eq!(MapAction::ServerStats(3).min_proto_version(), 0);
     }
@@ -1219,8 +1219,8 @@ mod tests {
     fn proto_version_bytes_mapping() {
         assert_eq!(client_proto_version(&VERSION_BYTES_V5), Some(5));
         assert_eq!(client_proto_version(&VERSION_BYTES_V6), Some(6));
-        assert_eq!(client_proto_version(&VERSION_BYTES_V7), Some(7));
-        assert_eq!(client_proto_version(&CURR_VERSION_BYTES), Some(7));
+        assert_eq!(client_proto_version(&CURR_VERSION_BYTES), Some(6));
+        assert_eq!(client_proto_version(&[0xFF, 0x07, 0x80]), None);
         assert_eq!(client_proto_version(&[0xFF, 0x04, 0x80]), None);
         assert_eq!(client_proto_version(&[0x00, 0x07, 0x80]), None);
     }

@@ -32,22 +32,20 @@ pub type ActionDescArc = Arc<ActionDesc>;
 
 /// Protocol v5: no environment support; `map_base` env bits are always zero.
 pub const VERSION_BYTES_V5: [u8; 3] = [0xFF as u8, 0x05, 0x80];
-/// Protocol v6: `map_base` bits 2-4 carry the map environment (see `RoomCreationDeets::map_env`).
+/// Protocol v6: `map_base` bits 2-4 carry the map environment (see
+/// `RoomCreationDeets::map_env`), and adds the ephemeral `PlayerTestMode`
+/// message (test-mode enter/leave + car-skin url), relayed to v6+ clients
+/// only (see the `min_proto_version` gate in `run_player_loop`).
 pub const VERSION_BYTES_V6: [u8; 3] = [0xFF as u8, 0x06, 0x80];
-/// Protocol v7: adds the ephemeral `PlayerTestMode` message (test-mode
-/// enter/leave + car-skin url). Only relayed to v7+ clients (see the
-/// `min_proto_version` gate in `run_player_loop`).
-pub const VERSION_BYTES_V7: [u8; 3] = [0xFF as u8, 0x07, 0x80];
 /// What our own clients/bots send. Older versions are still accepted on connect;
 /// see `client_proto_version` and the env gate in `manage_room`.
-pub const CURR_VERSION_BYTES: [u8; 3] = VERSION_BYTES_V7;
+pub const CURR_VERSION_BYTES: [u8; 3] = VERSION_BYTES_V6;
 
 /// Map a client's version bytes to a protocol version number, or None if unsupported.
 pub fn client_proto_version(ver_buf: &[u8; 3]) -> Option<u8> {
     match *ver_buf {
         VERSION_BYTES_V5 => Some(5),
         VERSION_BYTES_V6 => Some(6),
-        VERSION_BYTES_V7 => Some(7),
         _ => None,
     }
 }
