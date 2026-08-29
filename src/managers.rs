@@ -859,6 +859,7 @@ pub struct RoomManager {
     // Track active rooms
     pub rooms: RwLock<HashMap<u64, Arc<Room>>>, // Example with room ID as key
     pub dump_mbs: bool,
+    pub exit_when_idle_mins: Option<u64>,
 }
 
 lazy_static! {
@@ -870,10 +871,14 @@ impl RoomManager {
         RoomManager {
             rooms: HashMap::new().into(),
             dump_mbs: opts.dump_macroblocks,
+            exit_when_idle_mins: opts.exit_when_idle_mins,
         }
     }
 
     pub async fn room_mgr_loop(&self) {
+        const STATS_LOG_EVERY: Duration = Duration::from_secs(300);
+        let mut last_stats_log = std::time::Instant::now() - STATS_LOG_EVERY;
+        let mut last_active = std::time::Instant::now();
         loop {
             let rooms = self.rooms.read().await;
             let mut to_remove = vec![];
@@ -891,8 +896,22 @@ impl RoomManager {
                     }
                 }
             }
+            let nb_rooms = rooms.len() - to_remove.len();
             drop(rooms);
             *TOTAL_PLAYERS.write().await = total_players;
+            if total_players > 0 {
+                last_active = std::time::Instant::now();
+            }
+            if last_stats_log.elapsed() >= STATS_LOG_EVERY {
+                last_stats_log = std::time::Instant::now();
+                log::info!("[stats] players connected: {} across {} rooms", total_players, nb_rooms);
+            }
+            if let Some(mins) = self.exit_when_idle_mins {
+                if total_players == 0 && last_active.elapsed() >= Duration::from_secs(mins * 60) {
+                    log::warn!("[idle-exit] no players for {} min; exiting for supervisor restart (rooms are memory-only and will be lost)", mins);
+                    std::process::exit(0);
+                }
+            }
             if to_remove.len() > 0 {
                 let mut rooms = self.rooms.write().await;
                 for id in to_remove {

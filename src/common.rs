@@ -9,6 +9,10 @@ use crate::managers::*;
 #[derive(Default)]
 pub struct ServerOpts {
     pub dump_macroblocks: bool,
+    /// When set, exit(0) after this many minutes with zero connected players
+    /// so a supervisor (systemd Restart=always) restarts us on a fresh binary.
+    /// Rooms are memory-only and are LOST on exit — leave unset in production.
+    pub exit_when_idle_mins: Option<u64>,
 }
 
 

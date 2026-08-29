@@ -31,6 +31,16 @@ async fn main() {
     let dump_macroblocks = args.contains(&"--dump-macroblocks".into());
     DUMP_MBS.get_or_init(|| { dump_macroblocks });
 
+    // --exit-when-idle-mins N (or env MT_EXIT_WHEN_IDLE_MINS=N): exit(0) after
+    // N minutes with zero players so a supervisor restarts us on the current
+    // binary. Rooms are memory-only and are lost — dev/supervised use only.
+    let exit_when_idle_mins = args.iter()
+        .position(|a| a == "--exit-when-idle-mins")
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+        .or_else(|| std::env::var("MT_EXIT_WHEN_IDLE_MINS").ok())
+        .and_then(|v| v.parse::<u64>().ok());
+
     let logger = SimpleLogger::new()
         .with_level(LevelFilter::Trace)
         .with_colors(true);
@@ -41,8 +51,12 @@ async fn main() {
     let nb_configs = init_op_config().await;
     log::info!("Configurations initialized: {}", nb_configs);
 
+    if let Some(mins) = exit_when_idle_mins {
+        log::info!("idle-exit enabled: restarting via supervisor after {} min with 0 players", mins);
+    }
+
     let (listener, init_manager, room_manager) = get_server_things(ServerOpts {
-        dump_macroblocks, ..Default::default()
+        dump_macroblocks, exit_when_idle_mins, ..Default::default()
     }).await;
 
     run_server(listener, init_manager, room_manager).await;
