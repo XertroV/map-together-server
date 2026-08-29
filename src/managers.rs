@@ -30,7 +30,22 @@ use crate::{ServerOpts, XERTROV_WSID};
 pub type ActionDesc = (MapAction, PlayerID, SystemTime, OnceCell<Vec<u8>>);
 pub type ActionDescArc = Arc<ActionDesc>;
 
-pub const CURR_VERSION_BYTES: [u8; 3] = [0xFF as u8, 0x05, 0x80];
+/// Protocol v5: no environment support; `map_base` env bits are always zero.
+pub const VERSION_BYTES_V5: [u8; 3] = [0xFF as u8, 0x05, 0x80];
+/// Protocol v6: `map_base` bits 2-4 carry the map environment (see `RoomCreationDeets::map_env`).
+pub const VERSION_BYTES_V6: [u8; 3] = [0xFF as u8, 0x06, 0x80];
+/// What our own clients/bots send. Older versions are still accepted on connect;
+/// see `client_proto_version` and the env gate in `manage_room`.
+pub const CURR_VERSION_BYTES: [u8; 3] = VERSION_BYTES_V6;
+
+/// Map a client's version bytes to a protocol version number, or None if unsupported.
+pub fn client_proto_version(ver_buf: &[u8; 3]) -> Option<u8> {
+    match *ver_buf {
+        VERSION_BYTES_V5 => Some(5),
+        VERSION_BYTES_V6 => Some(6),
+        _ => None,
+    }
+}
 
 #[derive(Debug, Default)]
 struct PlayerSync {
@@ -878,9 +893,13 @@ impl RoomManager {
             player.get_name(),
             player.get_pid()
         );
+        let proto_version: u8;
         let mut rx: tokio::sync::RwLockWriteGuard<'_, OwnedReadHalf> = player.stream_r.write().await;
         let mut ver_buf = [0u8; 3];
-        match rx.peek(&mut ver_buf).await {
+        // read_exact, not peek: peek returns only the bytes that have already
+        // arrived, and the client writes these three bytes separately, so a
+        // partial read used to be misreported as a bad version.
+        match rx.read_exact(&mut ver_buf).await {
             Err(e) => {
                 log::error!("Error reading room message: {:?}", e);
                 player.shutdown_err("error reading room message").await;
@@ -888,22 +907,22 @@ impl RoomManager {
             }
             Ok(_) => {
                 // version flag 0xFF and version number with high bit set as flag.
-                if ver_buf != CURR_VERSION_BYTES {
-                    let err_msg = format!("\\$f40Invalid version bytes: 0x {:x} {:x} {:x}, please update", ver_buf[0], ver_buf[1], ver_buf[2]);
-                    log::warn!("{}", err_msg);
-                    #[cfg(test)]
-                    write_lp_string_owh(&mut *player.stream_w.write().await, &err_msg).await.unwrap();
-                    // write_lp_string_owh(&mut *player.stream_w.write().await, "\\$s\\$f84 Invalid version: please update.\n").await.unwrap();
-                    player.shutdown_err("\\$s\\$f84 Invalid version: please update.\n").await;
-                    return;
+                match client_proto_version(&ver_buf) {
+                    Some(v) => proto_version = v,
+                    None => {
+                        let err_msg = format!("\\$f40Invalid version bytes: 0x {:x} {:x} {:x}, please update", ver_buf[0], ver_buf[1], ver_buf[2]);
+                        log::warn!("{}", err_msg);
+                        #[cfg(test)]
+                        write_lp_string_owh(&mut *player.stream_w.write().await, &err_msg).await.unwrap();
+                        // write_lp_string_owh(&mut *player.stream_w.write().await, "\\$s\\$f84 Invalid version: please update.\n").await.unwrap();
+                        player.shutdown_err("\\$s\\$f84 Invalid version: please update.\n").await;
+                        return;
+                    }
                 }
             }
         }
 
-        // Consume version byte flag
-        let _ = rx.read_u8().await.unwrap();
-        // Consume version number
-        let _ = rx.read_u16().await.unwrap();
+        // (version bytes already consumed by read_exact above)
         drop(rx);
 
         // read commands from player.stream
@@ -924,9 +943,17 @@ impl RoomManager {
                     RoomMsg::Join(deets) => {
                         log::debug!("RoomConnectionDeets: {:?}", deets);
                         // Join room
+                        let room_id = match str_to_room_id(&deets.room_id) {
+                            Some(id) => id,
+                            None => {
+                                log::warn!("Malformed room id: {:?}", deets.room_id);
+                                player.shutdown_err("malformed room id").await;
+                                return;
+                            }
+                        };
                         let rooms = self.rooms.read().await;
                         log::debug!("Got Rooms Read Lock");
-                        let room = match rooms.get(&str_to_room_id(&deets.room_id).unwrap()) {
+                        let room = match rooms.get(&room_id) {
                             Some(room) => room.clone(),
                             None => {
                                 log::warn!("Room not found: {}", deets.room_id);
@@ -934,6 +961,19 @@ impl RoomManager {
                                 return;
                             }
                         };
+
+                        // v5 clients silently mask off the env bits and would open a
+                        // Stadium map in a non-Stadium room, desyncing everything.
+                        if room.deets.map_env() != 0 && proto_version < 6 {
+                            log::warn!(
+                                "Refusing v{} client on env-{} room: {}",
+                                proto_version, room.deets.map_env(), deets.room_id
+                            );
+                            player
+                                .shutdown_err("\\$s\\$f84 This room uses a custom environment; please update Map Together.\n")
+                                .await;
+                            return;
+                        }
 
                         let is_xert = player.get_pid() == XERTROV_WSID;
                         let password_match = room.deets.password.len() == 0 || room.deets.password == deets.password;

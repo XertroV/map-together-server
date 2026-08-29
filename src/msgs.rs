@@ -35,7 +35,20 @@ pub struct RoomCreationDeets {
     pub player_limit: u16,
 }
 
+/// Map environments, encoded in `map_base` bits 2-4. 0 == Stadium keeps the
+/// byte backwards-compatible with protocol v5, which only used the mood (bits
+/// 0-1) and base (bits 5-7).
+pub const MAP_ENV_MASK: u8 = 0b0001_1100;
+pub const MAP_ENV_SHIFT: u8 = 2;
+
 impl RoomCreationDeets {
+    /// 0=Stadium, 1=RedIsland, 2=GreenCoast, 3=BlueBay, 4=WhiteShore.
+    pub fn map_env(&self) -> u8 {
+        (self.map_base & MAP_ENV_MASK) >> MAP_ENV_SHIFT
+    }
+    pub fn map_mood(&self) -> u8 {
+        self.map_base & 3
+    }
     pub fn allow_custom_items(&self) -> bool {
         self.rules_flags & 1 == 1
     }
@@ -116,14 +129,16 @@ pub fn room_id_to_str(id: u64) -> String {
     s
 }
 
+/// Total: returns None for anything that is not exactly 6 characters from
+/// ALPHABET, rather than panicking on a malformed/hostile room id.
 pub fn str_to_room_id(s: &str) -> Option<u64> {
-    if s.len() != 6 {
+    if s.chars().count() != 6 {
         return None;
     }
     let mut id = 0;
     for (i, c) in s.chars().enumerate() {
-        let pos = ALPHABET.find(c).unwrap();
-        id += pos as u64 * 62u64.pow(i as u32);
+        let pos = ALPHABET.find(c)? as u64;
+        id += pos * 62u64.pow(i as u32);
     }
     Some(id)
 }
