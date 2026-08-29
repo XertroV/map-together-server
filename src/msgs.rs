@@ -321,7 +321,7 @@ impl MTDecode for Cursor {
     }
 }
 
-/// Test-mode announce (v7+): a player entered/left editor test mode. On enter
+/// Test-mode announce (v6+): a player entered/left editor test mode. On enter
 /// it carries their car-skin url (may be empty for the default skin).
 #[derive(Debug, Clone)]
 pub struct PlayerTestMode {

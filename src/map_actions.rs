@@ -85,7 +85,7 @@ pub enum MapAction {
     Ping(),
     /// players connected, response to ping
     ServerStats(u32),
-    /// test-mode enter/leave + car-skin url (ephemeral; v7+ only)
+    /// test-mode enter/leave + car-skin url (ephemeral; v6+ only)
     PlayerTestMode(PlayerTestMode),
 }
 
