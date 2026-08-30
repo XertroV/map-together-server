@@ -80,6 +80,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "sends a fake auth token; server-side Openplanet validation rejects it"]
     async fn check_simple_connection() {
         let (listener, init_manager, room_manager) = get_server_things(Default::default()).await;
         let listener_addr: std::net::SocketAddr = listener.local_addr().unwrap();

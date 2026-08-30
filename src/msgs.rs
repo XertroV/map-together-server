@@ -46,9 +46,6 @@ impl RoomCreationDeets {
     pub fn map_env(&self) -> u8 {
         (self.map_base & MAP_ENV_MASK) >> MAP_ENV_SHIFT
     }
-    pub fn map_mood(&self) -> u8 {
-        self.map_base & 3
-    }
     pub fn allow_custom_items(&self) -> bool {
         self.rules_flags & 1 == 1
     }
