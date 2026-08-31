@@ -94,49 +94,46 @@ impl Player {
         &self.token_resp.account_id
     }
 
+    /// Queue any not-yet-synced room actions onto this player's write channel.
+    /// Sends inline (try_send is non-blocking) rather than via a spawned task:
+    /// concurrently spawned tasks could interleave batches and deliver actions
+    /// out of order, which corrupts map state on the client.
     pub async fn sync_actions(
-        &self,
+        self: &Arc<Self>,
         actions: &Vec<Arc<(MapAction, PlayerID, SystemTime, OnceCell<Vec<u8>>)>>,
     ) {
         let mut sync = self.sync.write().await;
-        if sync.last_sync == actions.len() {
+        if sync.last_sync >= actions.len() {
             return;
         }
-        let new_actions = actions[sync.last_sync..].to_vec();
-        sync.last_sync += new_actions.len();
-        drop(sync);
-        let acc_id = self.token_resp.account_id.clone();
-        let name: String = self.get_name().into();
-        let action_tx = self.action_tx.clone();
-        tokio::spawn(async move {
-            log::trace!(
-                "Syncing actions: {:?} for player {:?}",
-                new_actions.len(),
-                acc_id
-            );
-            for action in new_actions {
-                match action_tx.try_send(action.clone()) {
-                    Ok(_) => {
-                        // log::debug!(
-                        //     "Wrote sync action: {:?} -> player {:?} to queue",
-                        //     action.0.get_type(),
-                        //     name
-                        // );
-                    }
-                    Err(e) => {
-                        match e {
-                            mpsc::error::TrySendError::Full(_) => {
-                                log::error!("Error (Full) sending action to player {:?}: {:?} - dropping", name, e);
-                            },
-                            mpsc::error::TrySendError::Closed(_) => {
-                                log::error!("Error sending action to player {:?}: {:?} - dropping", name, e);
-                                break;
-                            },
-                        }
-                    }
+        let new_actions = &actions[sync.last_sync..];
+        sync.last_sync = actions.len();
+        log::trace!(
+            "Syncing actions: {:?} for player {:?}",
+            new_actions.len(),
+            self.token_resp.account_id
+        );
+        for action in new_actions {
+            match self.action_tx.try_send(action.clone()) {
+                Ok(_) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    // A silently dropped action would desync this client for
+                    // the rest of the session; force a reconnect instead.
+                    // Shutdown via a task: stream_w may be held by a blocked
+                    // write to this same (slow/dead) peer.
+                    log::error!("Action queue full for player {:?} - disconnecting for resync", self.get_name());
+                    let p = self.clone();
+                    tokio::spawn(async move {
+                        p.shutdown_err("action queue overflow, please reconnect").await;
+                    });
+                    break;
+                }
+                Err(e @ mpsc::error::TrySendError::Closed(_)) => {
+                    log::error!("Error sending action to player {:?}: {:?} - dropping", self.get_name(), e);
+                    break;
                 }
             }
-        });
+        }
     }
 
     pub async fn write_action(
@@ -209,8 +206,7 @@ impl Player {
                 write_lp_string_owh(&mut stream, &pid.0).await?;
                 stream
                     .write_u64_le(time.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64)
-                    .await
-                    .unwrap();
+                    .await?;
             }
             MapAction::SetMapName(name) => {
                 stream.write_u8(MAPPING_MSG_SET_MAPNAME).await?;
@@ -218,8 +214,7 @@ impl Player {
                 write_lp_string_owh(&mut stream, &pid.0).await?;
                 stream
                     .write_u64_le(time.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64)
-                    .await
-                    .unwrap();
+                    .await?;
             }
             MapAction::PlayerJoin { name, account_id } => {
                 let mut buf = vec![];
@@ -230,8 +225,7 @@ impl Player {
                 write_lp_string_owh(&mut stream, &account_id).await?;
                 stream
                     .write_u64_le(time.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64)
-                    .await
-                    .unwrap();
+                    .await?;
             }
             MapAction::PlayerLeave { name, account_id } => {
                 let mut buf = vec![];
@@ -242,8 +236,7 @@ impl Player {
                 write_lp_string_owh(&mut stream, &account_id).await?;
                 stream
                     .write_u64_le(time.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64)
-                    .await
-                    .unwrap();
+                    .await?;
             }
             MapAction::Admin_PromoteMod(t_pid) => write_str_msg_full(stream, MAPPING_MSG_PROMOTE_MOD, &t_pid.0, pid, time).await?,
             MapAction::Admin_DemoteMod(t_pid) => write_str_msg_full(stream, MAPPING_MSG_DEMOTE_MOD, &t_pid.0, pid, time).await?,
@@ -263,8 +256,7 @@ impl Player {
                 write_lp_string_owh(&mut stream, &pid.0).await?;
                 stream
                     .write_u64_le(time.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64)
-                    .await
-                    .unwrap();
+                    .await?;
             }
 
             MapAction::PlayerCamCursor(cam_cursor) => {
@@ -477,6 +469,12 @@ impl Player {
                 let len = read_checked_msg_u32_len(stream).await?;
                 let mut buf = vec![0u8; len as usize];
                 stream.read_exact(&mut buf).await?;
+                if buf.len() < 4 {
+                    return Err(StreamErr::InvalidData(format!(
+                        "SetActionLimit msg too short: {}",
+                        buf.len()
+                    )));
+                }
                 let limit = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
                 Ok(MapAction::Admin_SetActionLimit(limit))
             }
@@ -485,8 +483,17 @@ impl Player {
                 let len = read_checked_msg_u32_len(stream).await?;
                 let mut buf = vec![0u8; len as usize];
                 stream.read_exact(&mut buf).await?;
-                let k = slice_to_lp_string(&buf[4..])?;
-                let v = slice_to_lp_string(&buf[4 + 2 + k.len()..])?;
+                // layout: [4 unused bytes][lp key][lp value]; offsets from the
+                // wire length prefix, not k.len() (lossy utf8 can change it).
+                let rest = buf.get(4..).ok_or_else(|| {
+                    StreamErr::InvalidData(format!("SetVariable msg too short: {}", buf.len()))
+                })?;
+                let k = slice_to_lp_string(rest)?;
+                let k_wire_len = u16::from_le_bytes([rest[0], rest[1]]) as usize;
+                let v_rest = rest.get(2 + k_wire_len..).ok_or_else(|| {
+                    StreamErr::InvalidData("SetVariable msg missing value".to_string())
+                })?;
+                let v = slice_to_lp_string(v_rest)?;
                 Ok(MapAction::Admin_SetVariable(k, v))
             }
             MAPPING_MSG_SET_ROOM_PLAYER_LIMIT => {
@@ -508,6 +515,9 @@ impl Player {
                 let len = read_checked_msg_u32_len(stream).await?;
                 let mut buf = vec![0u8; len as usize];
                 stream.read_exact(&mut buf).await?;
+                if buf.is_empty() {
+                    return Err(StreamErr::InvalidData("empty chat msg".to_string()));
+                }
                 let ty = buf[0];
                 let msg = slice_to_lp_string(&buf[1..])?;
                 log::debug!("Chat from {}: {}", self.get_name(), msg);
@@ -523,6 +533,12 @@ impl Player {
                 let mut buf = vec![0u8; len as usize];
                 stream.read_exact(&mut buf).await?;
                 log::debug!("Got server stats msg from {}??", self.get_name());
+                if buf.len() < 4 {
+                    return Err(StreamErr::InvalidData(format!(
+                        "ServerStats msg too short: {}",
+                        buf.len()
+                    )));
+                }
                 Ok(MapAction::ServerStats(u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]])))
             }
             _ => Err(StreamErr::InvalidData(format!(
@@ -533,6 +549,8 @@ impl Player {
     }
 
     pub async fn shutdown(&self) {
+        // wake the read loop (it selects on shutdown_rx); ignore full/closed
+        let _ = self.shutdown_tx.try_send(());
         let _ = self.stream_w.write().await.shutdown().await;
     }
 
@@ -718,40 +736,74 @@ impl Room {
         self.room_tx_action.send(action).await
     }
 
+    /// Server-side effects of relayed actions. Currently: keep the enforced
+    /// join limit in sync with Admin_SetRoomPlayerLimit (owner-sent only —
+    /// there is no server-side admin tracking yet); it previously stayed at
+    /// the room-creation value forever, making the admin action a no-op for
+    /// actual join enforcement.
+    async fn apply_server_side(&self, action: &ActionDescArc) {
+        if let MapAction::Admin_SetRoomPlayerLimit(limit) = &action.0 {
+            if (action.1).0 == self.owner.read().await.get_pid() {
+                *self.player_limit.write().await = *limit;
+                log::info!("[{}] enforced player limit set to {} by owner", self.id_str, limit);
+            }
+        }
+    }
+
     pub async fn run(&self, mut room_rx_action: Receiver<ActionDesc>, this_room: Arc<Room>) {
         // action reciever loop
         tokio::spawn(async move {
             while !this_room.has_expired.initialized() {
-                let action1 = match room_rx_action.recv().await {
-                    // if we get none, the channel is closed
-                    None => break,
-                    Some(action) => action,
+                // recv with a timeout: the Room holds its own Sender, so the
+                // channel never closes; a bare recv() would block this task
+                // forever after expiry, leaking the Room (and its entire
+                // action history) for the life of the server.
+                let action1 = match time::timeout(Duration::from_secs(10), room_rx_action.recv()).await {
+                    Err(_) => continue, // timeout: re-check has_expired
+                    Ok(None) => break,  // channel closed
+                    Ok(Some(action)) => action,
                 };
-                // room_rx_action.poll_recv_many(cx, buffer, limit)
                 let mut new_actions = vec![Arc::new(action1)];
                 // can get error on closed or empty
                 while let Ok(action) = room_rx_action.try_recv() {
                     new_actions.push(action.into());
                 }
+                for a in new_actions.iter() {
+                    this_room.apply_server_side(a).await;
+                }
                 this_room.actions.write().await.extend(new_actions.into_iter());
-                // after adding actions, need to sync players
-                let players = this_room.players.read().await;
-                let actions = this_room.actions.read().await;
-                for player in players.iter() {
-                    if player.action_tx.is_closed() {
-                        log::info!("Player action tx closed, removing player: {:?}", player.get_name());
-                        player.shutdown_err("failed to send actions, please reconnect").await;
-                        this_room.player_left(&player).await;
-                    } else {
-                        player.sync_actions(&actions).await;
+                // After adding actions, sync players. Stale players are only
+                // collected here and removed after the read guard is dropped:
+                // player_left takes players.write(), so removing inline while
+                // holding players.read() deadlocks and freezes the room.
+                let mut stale: Vec<Arc<Player>> = vec![];
+                {
+                    let players = this_room.players.read().await;
+                    let actions = this_room.actions.read().await;
+                    for player in players.iter() {
+                        if player.action_tx.is_closed() {
+                            stale.push(player.clone());
+                        } else {
+                            player.sync_actions(&actions).await;
+                        }
                     }
+                }
+                for player in stale {
+                    log::info!("Player action tx closed, removing player: {:?}", player.get_name());
+                    let room = this_room.clone();
+                    // in a task: shutdown_err needs stream_w, which a wedged
+                    // write to this same dead/slow peer may hold for minutes.
+                    tokio::spawn(async move {
+                        player.shutdown_err("failed to send actions, please reconnect").await;
+                        room.player_left(&player).await;
+                    });
                 }
             }
         });
 
-        // check if we have no players every 10ms. If we have no players for stale_minutes (20 minutes), close the room.
+        // check if we have no players every 1s. If we have no players for stale_minutes, close the room.
         let mut no_players = 0;
-        let wait_ms = 10;
+        let wait_ms = 1000;
         // let stale_minutes = 720; // 20; // 720 = 12 hrs
         let stale_minutes = 30; // 20; // 720 = 12 hrs
         loop {
@@ -836,12 +888,22 @@ impl Room {
         // 10 + 4 + 2 = 16
     }
 
-    pub async fn player_left(&self, p: &Player) {
+    /// Remove exactly this connection (by Arc identity, not account id: on a
+    /// reconnect the old connection's cleanup fires ~1 RTT after the new one
+    /// joined, and matching by account id would silently remove the freshly
+    /// joined player too). Broadcasts PlayerLeave only if we removed it, so a
+    /// second cleanup call (read + write loop both end) is a no-op.
+    pub async fn player_left(&self, p: &Arc<Player>) {
         log::debug!("getting players lock");
         let mut players = self.players.write().await;
         log::debug!("got players lock");
-        players.retain(|x| x.token_resp.account_id != p.token_resp.account_id);
+        let before = players.len();
+        players.retain(|x| !Arc::ptr_eq(x, p));
+        let removed = players.len() != before;
         drop(players);
+        if !removed {
+            return;
+        }
         let action = MapAction::PlayerLeave {
             name: p.token_resp.display_name.clone(),
             account_id: p.token_resp.account_id.clone(),
@@ -936,13 +998,20 @@ impl RoomManager {
         // read_exact, not peek: peek returns only the bytes that have already
         // arrived, and the client writes these three bytes separately, so a
         // partial read used to be misreported as a bad version.
-        match rx.read_exact(&mut ver_buf).await {
-            Err(e) => {
+        // The timeout stops a stalled/hostile client from parking this
+        // connection here forever.
+        match time::timeout(Duration::from_secs(20), rx.read_exact(&mut ver_buf)).await {
+            Err(_) => {
+                log::warn!("Timed out waiting for version bytes");
+                player.shutdown_err("timed out waiting for version").await;
+                return;
+            }
+            Ok(Err(e)) => {
                 log::error!("Error reading room message: {:?}", e);
                 player.shutdown_err("error reading room message").await;
                 return;
             }
-            Ok(_) => {
+            Ok(Ok(_)) => {
                 // version flag 0xFF and version number with high bit set as flag.
                 match client_proto_version(&ver_buf) {
                     Some(v) => proto_version = v,
@@ -964,10 +1033,22 @@ impl RoomManager {
         player.proto_version = proto_version;
 
         // read commands from player.stream
-        match player.read_room_msg().await {
+        let room_msg = match time::timeout(Duration::from_secs(30), player.read_room_msg()).await {
+            Err(_) => {
+                log::warn!("Timed out waiting for room create/join message");
+                player.shutdown_err("timed out waiting for room message").await;
+                return;
+            }
+            Ok(r) => r,
+        };
+        match room_msg {
             Ok(msg) => {
                 log::debug!("RoomMsg: {:?}", msg);
-                player.stream_w.write().await.write(b"OK_").await.expect("to write OK_");
+                if let Err(e) = player.stream_w.write().await.write_all(b"OK_").await {
+                    log::warn!("Error writing OK_ to player: {:?}", e);
+                    player.shutdown().await;
+                    return;
+                }
                 match msg {
                     RoomMsg::Create(deets) => {
                         log::debug!("RoomCreationDeets: {:?}", deets);
@@ -1066,10 +1147,29 @@ impl InitializationManager {
     }
 
     pub async fn initialize_connection(&self, mut stream: TcpStream) {
-        let peer = stream.peer_addr().expect("to get peer addr");
+        // peer_addr fails if the peer already disconnected; don't panic
+        let peer = match stream.peer_addr() {
+            Ok(p) => p,
+            Err(e) => {
+                log::warn!("Could not get peer addr (already disconnected?): {:?}", e);
+                return;
+            }
+        };
         log::info!("Initializing connection from: {:?}", peer);
 
-        let token = read_lp_string(&mut stream).await;
+        // Timeout: port scanners connect and send nothing (or a partial
+        // length-prefixed read never completes); without this the socket and
+        // task are held forever (observed live: weeks-old half-open conns).
+        let token = match time::timeout(Duration::from_secs(20), read_lp_string(&mut stream)).await {
+            Err(_) => {
+                log::warn!("Timed out reading token from {:?}", peer);
+                let _ = stream.write_all(b"ERR").await;
+                let _ = write_lp_string(&mut stream, "timed out reading token").await;
+                let _ = stream.shutdown().await;
+                return;
+            }
+            Ok(t) => t,
+        };
 
         if let Err(e) = token {
             log::error!("Error reading token: {:?}", e);
@@ -1106,7 +1206,7 @@ impl InitializationManager {
                 log::warn!("Token not verified!");
                 let _ = stream.write_all(b"ERR").await;
                 let _ = write_lp_string(&mut stream, "auth token verification failed").await;
-                stream.shutdown().await.unwrap();
+                let _ = stream.shutdown().await;
                 log::warn!("shutdown player, returning");
                 return;
             }
@@ -1252,5 +1352,49 @@ mod tests {
         let id = str_to_room_id(id_str).unwrap();
         let id2 = room_id_to_str(id);
         assert_eq!(id_str, id2);
+    }
+
+    /// Undersized payloads on the raw-indexed message types must surface as
+    /// InvalidData, not a panic: a panic here unwinds the read-loop task
+    /// before its player_left cleanup, leaving a ghost player in the room.
+    #[tokio::test]
+    async fn malformed_short_msgs_error_instead_of_panic() {
+        use crate::map_actions::{
+            MAPPING_MSG_CHAT_MSG, MAPPING_MSG_SERVER_STATS, MAPPING_MSG_SET_ACTION_LIMIT,
+            MAPPING_MSG_SET_VARIABLE,
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let cases: [(u8, Vec<u8>); 5] = [
+            (MAPPING_MSG_CHAT_MSG, vec![]),
+            (MAPPING_MSG_SET_VARIABLE, vec![0u8; 2]),
+            (MAPPING_MSG_SET_VARIABLE, vec![0u8, 0, 0, 0, 5, 0]), // key promises 5 bytes, has 0
+            (MAPPING_MSG_SET_ACTION_LIMIT, vec![0u8; 2]),
+            (MAPPING_MSG_SERVER_STATS, vec![0u8; 2]),
+        ];
+        for (ty, payload) in cases {
+            let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let (server, _) = listener.accept().await.unwrap();
+            let token_resp = TokenResp {
+                account_id: "test-acct".into(),
+                display_name: "tester".into(),
+                token_time: 0,
+            };
+            let (player, _rx) = Player::new(token_resp, server);
+            client.write_u8(ty).await.unwrap();
+            client.write_u32_le(payload.len() as u32).await.unwrap();
+            client.write_all(&payload).await.unwrap();
+            client.flush().await.unwrap();
+            // slice_to_lp_string reports truncation as StreamErr::Io(InvalidData);
+            // either error variant is fine — the point is Err, never a panic.
+            let res = player.read_map_msg().await;
+            assert!(
+                matches!(res, Err(StreamErr::InvalidData(_)) | Err(StreamErr::Io(_))),
+                "msg type {} with {}-byte payload: expected an error, got {:?}",
+                ty,
+                payload.len(),
+                res
+            );
+        }
     }
 }

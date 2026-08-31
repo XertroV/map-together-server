@@ -103,7 +103,12 @@ pub async fn run_player_loop(player: Arc<Player>, room: Arc<Room>, mut action_rx
                             if a.0.is_ephemeral() {
                                 ephemeral_action = Some(a);
                             } else if a.0.is_ping() {
-                                let _ = Player::write_action(&mut *player.stream_w.write().await, &MapAction::ServerStats(*TOTAL_PLAYERS.read().await), &player.get_pid().into(), SystemTime::now(), &Default::default()).await;
+                                // copy the count first: inlining the read guard
+                                // into write_action holds it across the socket
+                                // write, blocking the room_mgr_loop's writer if
+                                // this peer stops reading.
+                                let nb_players = *TOTAL_PLAYERS.read().await;
+                                let _ = Player::write_action(&mut *player.stream_w.write().await, &MapAction::ServerStats(nb_players), &player.get_pid().into(), SystemTime::now(), &Default::default()).await;
                             } else {
                                 action = Some(a);
                                 sync_actions = true;
@@ -142,17 +147,14 @@ pub async fn run_player_loop(player: Arc<Player>, room: Arc<Room>, mut action_rx
 
                 if let Some(action) = ephemeral_action {
                     let action: Arc<_> = action.into();
-                    // log::debug!("ephemeral action: players read lock");
                     let players = room.players.read().await.clone();
-                    // log::debug!("ephemeral action: players read unlock");
-                    tokio::spawn(async move {
-                        // log::debug!("ephemeral action {:?}: writing to all players", &action.0.get_type());
-                        for p in players.iter() {
-                            let _ = p.action_tx.send(action.clone()).await;
-                            // Player::write_action(&mut *p.stream_w.write().await, &action.0, &action.1, action.2, &action.3).await;
-                        }
-                        // log::debug!("ephemeral action {:?}: done writing to all players", &action.0.get_type());
-                    });
+                    // Inline, not spawned: spawned fan-out tasks can run out of
+                    // order and deliver stale cursor/vehicle positions after
+                    // newer ones. try_send so one player's full queue can't
+                    // stall this read loop; dropping an ephemeral is harmless.
+                    for p in players.iter() {
+                        let _ = p.action_tx.try_send(action.clone());
+                    }
                 }
             }
 

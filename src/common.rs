@@ -1,7 +1,9 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use rand::Rng;
-use tokio::{io::Interest, net::TcpListener, sync::RwLock};
+use socket2::{SockRef, TcpKeepalive};
+use tokio::{net::TcpListener, sync::RwLock};
 
 use crate::managers::*;
 
@@ -27,23 +29,33 @@ pub async fn run_server(
         room_mgr_c.read().await.room_mgr_loop().await
     });
 
+    // Kernel-level keepalive so peers that vanish (NAT timeout, power loss)
+    // error out of blocked reads/writes in ~2 min instead of holding a room
+    // slot forever (observed live: established conns idle for 45+ days).
+    let keepalive = TcpKeepalive::new()
+        .with_time(Duration::from_secs(60))
+        .with_interval(Duration::from_secs(15))
+        .with_retries(4);
+
     loop {
-        let (socket, _) = listener
-            .accept()
-            .await
-            .expect("Failed to accept connection");
+        // A transient accept error (e.g. EMFILE under a connection flood) must
+        // not kill the accept loop — that would take the whole server down.
+        let (socket, _) = match listener.accept().await {
+            Ok(x) => x,
+            Err(e) => {
+                log::error!("Error accepting connection: {:?}", e);
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+        };
+        if let Err(e) = SockRef::from(&socket).set_tcp_keepalive(&keepalive) {
+            log::warn!("Failed to set TCP keepalive: {:?}", e);
+        }
         let init_manager_clone = init_manager.clone();
 
         // Spawn a new task for each connection
         tokio::spawn(async move {
-            match socket.ready(Interest::READABLE).await {
-                Ok(_) => {
-                    init_manager_clone.initialize_connection(socket).await;
-                }
-                Err(e) => {
-                    log::error!("Error waiting for socket readiness: {:?}", e);
-                }
-            }
+            init_manager_clone.initialize_connection(socket).await;
         });
     }
 }

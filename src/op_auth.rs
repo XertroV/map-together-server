@@ -28,6 +28,12 @@ pub struct JErrorResp {
 lazy_static! {
     static ref PLUGIN_SITE_ID_TO_OP_CONFIG: RwLock<HashMap<i32, Config>> = RwLock::new(HashMap::new());
     static ref TOKEN_CACHE: RwLock<LruCache<String, TokenResp>> = RwLock::new(LruCache::new(NonZeroUsize::new(4096).unwrap()));
+    // Shared client with a hard timeout: without one, a hung auth upstream
+    // leaves connections stuck in check_token forever (observed live).
+    static ref HTTP_CLIENT: reqwest::Client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .expect("to build reqwest client");
 }
 
 pub async fn init_op_config() -> usize {
@@ -77,8 +83,7 @@ pub async fn check_token(token: &str, plugin_id: i32) -> Option<TokenResp> {
     }
     drop(token_cache);
 
-    let client = reqwest::Client::new();
-    let res = client.post(&config.url)
+    let res = HTTP_CLIENT.post(&config.url)
         .form(&[("token", token), ("secret", &config.secret)])
         .send()
         .await;
