@@ -26,7 +26,18 @@ test:
 check:
     cargo check -j2
 
-# Wait for 0 player connections for N min (default 10), then restart the dev
-# service to pick up a new binary. 30+ min is provably lossless (room TTL).
+# Dev: wait 0 connections 10 min, then restart dev unit. Args pass through.
 restart-when-idle *args:
     ./restart-when-idle.sh {{ args }}
+
+# Build, upload, and schedule an idle-restart on all prod servers (see DEPLOYMENT.md).
+deploy *args:
+    python3 deploy.py deploy {{ args }}
+
+# Per-host deploy status: unit, binary freshness, connections, last [stats], waiter.
+deploy-check *args:
+    python3 deploy.py check {{ args }}
+
+# Journald logs of the prod unit (e.g. `just deploy-logs -f --hosts de`).
+deploy-logs *args:
+    python3 deploy.py logs {{ args }}

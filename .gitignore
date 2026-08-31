@@ -2,3 +2,4 @@
 config.json
 *.mb_spec
 .worktrees/
+__pycache__/
