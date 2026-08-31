@@ -202,7 +202,7 @@ p "binary: $b md5=$(md5sum /root/map-together-server 2>/dev/null | cut -c1-32)"
 n=$(stat -c '%y' /root/map-together-server-next 2>/dev/null | cut -d. -f1)
 p "staged: ${n:-none} md5=$(md5sum /root/map-together-server-next 2>/dev/null | cut -c1-32)"
 p "prev: $(ls /root/map-together-server.prev >/dev/null 2>&1 && echo present || echo none)"
-p "run.sh: $(pgrep -fc 'bash \./run\.sh' 2>/dev/null || echo 0) old-proc, file $(ls /root/run.sh >/dev/null 2>&1 && echo present || echo absent)"
+p "run.sh: $(pgrep -fc 'bash \./run\.sh' 2>/dev/null) old-proc, file $(ls /root/run.sh >/dev/null 2>&1 && echo present || echo absent)"
 p "conns: $(ss -Htn state established "( sport = :19796 )" 2>/dev/null | wc -l) total, $(ss -Htino state established "( sport = :19796 )" 2>/dev/null | awk -v d=600000 '{for(i=1;i<=NF;i++) if ($i ~ /^lastsnd:/) {split($i,a,":"); if (a[2]+0 < d) {c++; break}}} END {print c+0}') active (traffic <10min)"
 echo "stats:"
 journalctl -u "$U" -o cat -n 8 --no-pager 2>/dev/null | grep '\[stats\]' | tail -2 | sed 's/^/  /'
