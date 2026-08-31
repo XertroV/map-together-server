@@ -116,7 +116,16 @@ pub async fn run_player_loop(player: Arc<Player>, room: Arc<Room>, mut action_rx
                             // Sync actions to all players, consider optimizing this part
                         },
                         Err(e) => {
-                            log::error!("Error reading map message from player {:?}: {:?}", player, e);
+                            // EOF is a normal client quit, not an error; and
+                            // never Debug-dump the whole Player struct.
+                            match &e {
+                                StreamErr::Io(io_e) if io_e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                                    log::info!("[{}] Player {:?} disconnected (EOF)", room.id_str, player.get_name());
+                                }
+                                _ => {
+                                    log::error!("[{}] Error reading map message from player {:?} ({}): {}", room.id_str, player.get_name(), player.get_pid(), e);
+                                }
+                            }
                             break; // Ends the loop and thus the task for this player
                         },
                     }
