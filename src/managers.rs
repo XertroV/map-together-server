@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::map_actions::{
-    MacroblockSpec, MapAction, PlayerID, SetSkinSpec, SkinSpec, WaypointSpec, MAPPING_MSG_ALERT_STATUS_TO_ALL, MAPPING_MSG_BAN_PLAYER, MAPPING_MSG_CHANGE_ADMIN, MAPPING_MSG_CHAT_MSG, MAPPING_MSG_DELETE, MAPPING_MSG_DEMOTE_MOD, MAPPING_MSG_KICK_PLAYER, MAPPING_MSG_PING, MAPPING_MSG_PLACE, MAPPING_MSG_PLAYER_CAMCURSOR, MAPPING_MSG_PLAYER_JOIN, MAPPING_MSG_PLAYER_LEAVE, MAPPING_MSG_PLAYER_TEST_MODE, MAPPING_MSG_PLAYER_VEHICLEPOS, MAPPING_MSG_PROMOTE_MOD, MAPPING_MSG_RESYNC, MAPPING_MSG_SERVER_STATS, MAPPING_MSG_SET_ACTION_LIMIT, MAPPING_MSG_SET_MAPNAME, MAPPING_MSG_SET_ROOM_PLAYER_LIMIT, MAPPING_MSG_SET_SKIN, MAPPING_MSG_SET_VARIABLE, MAPPING_MSG_SET_WAYPOINT
+    MacroblockSpec, MapAction, PlayerID, SetSkinSpec, SkinSpec, WaypointSpec, MAPPING_MSG_ALERT_STATUS_TO_ALL, MAPPING_MSG_BAN_PLAYER, MAPPING_MSG_CHANGE_ADMIN, MAPPING_MSG_CHAT_MSG, MAPPING_MSG_DELETE, MAPPING_MSG_DEMOTE_MOD, MAPPING_MSG_KICK_PLAYER, MAPPING_MSG_PING, MAPPING_MSG_PLACE, MAPPING_MSG_PLAYER_CAMCURSOR, MAPPING_MSG_PLAYER_JOIN, MAPPING_MSG_PLAYER_LEAVE, MAPPING_MSG_PLAYER_TEST_MODE, MAPPING_MSG_PLAYER_VEHICLEPOS, MAPPING_MSG_PROMOTE_MOD, MAPPING_MSG_RESYNC, MAPPING_MSG_SERVER_STATS, MAPPING_MSG_SET_ACTION_LIMIT, MAPPING_MSG_SET_MAPNAME, MAPPING_MSG_SET_ROOM_PLAYER_LIMIT, MAPPING_MSG_SET_SKIN, MAPPING_MSG_SET_VARIABLE, MAPPING_MSG_SET_WAYPOINT, MAPPING_MSG_VEHICLE_SAMPLE, VEHICLE_SAMPLE_MAX_LEN
 };
 use crate::msgs::{
     generate_room_id, room_id_to_str, str_to_room_id, PlayerCamCursor, PlayerTestMode, PlayerVehiclePos, RoomConnectionDeets, RoomCreationDeets, RoomMsg
@@ -324,6 +324,25 @@ impl Player {
                 write_encodable_msg_full(stream, MAPPING_MSG_PLAYER_TEST_MODE, tm, pid, time)
                     .await?
             }
+            MapAction::VehicleSample(bytes) => {
+                // opaque relay; OnceCell-cached like the other high-rate ephemerals
+                if buf.initialized() {
+                    stream.write_all(&buf.get().unwrap()).await?;
+                } else {
+                    let mut new_buf = vec![];
+                    new_buf.push(MAPPING_MSG_VEHICLE_SAMPLE);
+                    new_buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                    new_buf.extend_from_slice(bytes);
+                    write_lp_string_to_buf(&mut new_buf, &pid.0);
+                    new_buf.extend_from_slice(
+                        &(time.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64)
+                            .to_le_bytes(),
+                    );
+                    stream.write_all(&new_buf).await?;
+                    new_buf.shrink_to_fit();
+                    buf.get_or_init(|| async move { new_buf }).await;
+                }
+            }
         }
         Ok(())
     }
@@ -463,6 +482,20 @@ impl Player {
                 let mut buf = vec![0u8; len as usize];
                 stream.read_exact(&mut buf).await?;
                 Ok(MapAction::PlayerTestMode(PlayerTestMode::decode(&buf)?))
+            }
+            MAPPING_MSG_VEHICLE_SAMPLE => {
+                // replay-quality vehicle state: opaque self-versioned payload,
+                // relayed verbatim (docs/vehicle-sample-plan.md)
+                let len = read_checked_msg_u32_len(stream).await?;
+                if len > VEHICLE_SAMPLE_MAX_LEN {
+                    return Err(StreamErr::InvalidData(format!(
+                        "VehicleSample too large: {}",
+                        len
+                    )));
+                }
+                let mut buf = vec![0u8; len as usize];
+                stream.read_exact(&mut buf).await?;
+                Ok(MapAction::VehicleSample(buf))
             }
             MAPPING_MSG_SET_ACTION_LIMIT => {
                 // set action limit
@@ -1352,6 +1385,67 @@ mod tests {
         let id = str_to_room_id(id_str).unwrap();
         let id2 = room_id_to_str(id);
         assert_eq!(id_str, id2);
+    }
+
+    /// VehicleSample payloads are opaque: any bytes ≤ the cap round-trip
+    /// verbatim (the server never parses the fmt), oversize is rejected, and
+    /// the relayed frame is [24][u32 len][payload][lp pid][u64 ts].
+    #[tokio::test]
+    async fn vehicle_sample_opaque_roundtrip_cap_and_relay_framing() {
+        use crate::map_actions::MAPPING_MSG_VEHICLE_SAMPLE;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let token_resp = TokenResp {
+            account_id: "test-acct".into(),
+            display_name: "tester".into(),
+            token_time: 0,
+        };
+
+        // read side: opaque payload (fake fmt 9, arbitrary bytes) comes back verbatim
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        let (player, _rx) = Player::new(token_resp.clone(), server);
+        let payload: Vec<u8> = std::iter::once(9u8).chain((0..63).map(|i| i as u8)).collect();
+        client.write_u8(MAPPING_MSG_VEHICLE_SAMPLE).await.unwrap();
+        client.write_u32_le(payload.len() as u32).await.unwrap();
+        client.write_all(&payload).await.unwrap();
+        let action = player.read_map_msg().await.expect("read sample");
+        match &action {
+            MapAction::VehicleSample(bytes) => assert_eq!(bytes, &payload),
+            other => panic!("expected VehicleSample, got {:?}", other.get_type()),
+        }
+
+        // write side: relayed frame layout, byte for byte
+        let cell = OnceCell::new();
+        let pid: PlayerID = "some-player-id".into();
+        let t = SystemTime::now();
+        Player::write_action(&mut *player.stream_w.write().await, &action, &pid, t, &cell)
+            .await
+            .expect("relay write");
+        let mut expected = vec![MAPPING_MSG_VEHICLE_SAMPLE];
+        expected.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        expected.extend_from_slice(&payload);
+        write_lp_string_to_buf(&mut expected, &pid.0);
+        expected.extend_from_slice(
+            &(t.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64).to_le_bytes(),
+        );
+        let mut got = vec![0u8; expected.len()];
+        client.read_exact(&mut got).await.unwrap();
+        assert_eq!(got, expected);
+        // and the OnceCell now caches the exact frame for later recipients
+        assert_eq!(cell.get().unwrap(), &expected);
+
+        // oversize: len over the cap is refused before allocating/reading it
+        let mut client2 = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (server2, _) = listener.accept().await.unwrap();
+        let (player2, _rx2) = Player::new(token_resp, server2);
+        client2.write_u8(MAPPING_MSG_VEHICLE_SAMPLE).await.unwrap();
+        client2.write_u32_le(VEHICLE_SAMPLE_MAX_LEN + 1).await.unwrap();
+        client2.write_all(&[0u8; 8]).await.unwrap();
+        assert!(matches!(
+            player2.read_map_msg().await,
+            Err(StreamErr::InvalidData(_))
+        ));
     }
 
     /// Undersized payloads on the raw-indexed message types must surface as

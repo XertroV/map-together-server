@@ -51,6 +51,11 @@ pub const MAPPING_MSG_CHAT_MSG: u8 = 20;
 pub const MAPPING_MSG_PING: u8 = 21;
 pub const MAPPING_MSG_SERVER_STATS: u8 = 22;
 pub const MAPPING_MSG_PLAYER_TEST_MODE: u8 = 23;
+pub const MAPPING_MSG_VEHICLE_SAMPLE: u8 = 24;
+
+/// Relay size cap for a VehicleSample payload. fmt 1 is 64 bytes; the cap
+/// leaves generous room for append-only fmt growth while bounding abuse.
+pub const VEHICLE_SAMPLE_MAX_LEN: u32 = 512;
 
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone)]
@@ -87,6 +92,11 @@ pub enum MapAction {
     ServerStats(u32),
     /// test-mode enter/leave + car-skin url (ephemeral; v6+ only)
     PlayerTestMode(PlayerTestMode),
+    /// replay-quality vehicle state (ephemeral; v6+ only). The payload is an
+    /// opaque, self-versioned blob (leading fmt byte) relayed verbatim — the
+    /// server never parses it, so payload format bumps need no server deploy.
+    /// Spec: docs/vehicle-sample-plan.md.
+    VehicleSample(Vec<u8>),
 }
 
 impl MapAction {
@@ -96,6 +106,7 @@ impl MapAction {
             MapAction::PlayerCamCursor(_)
                 | MapAction::VehiclePos(_)
                 | MapAction::PlayerTestMode(_)
+                | MapAction::VehicleSample(_)
         )
     }
 
@@ -104,11 +115,15 @@ impl MapAction {
     }
 
     /// Minimum client protocol version that understands this message type.
-    /// Older clients crash on unknown message types, so the write loop drops
-    /// any action its recipient is too old for (see `run_player_loop`).
+    /// The v5 client (verified 2026-09-01: its skip path predates the v5
+    /// release) consumes-and-skips unknown length-prefixed types, but
+    /// warn-spams its log per message — and pre-v5 clients may crash — so the
+    /// write loop drops any action its recipient is too old for (see
+    /// `run_player_loop`). Every type added after v5 needs an arm here.
     pub fn min_proto_version(&self) -> u8 {
         match self {
             MapAction::PlayerTestMode(_) => 6,
+            MapAction::VehicleSample(_) => 6,
             _ => 0,
         }
     }
@@ -138,6 +153,7 @@ impl MapAction {
             MapAction::Ping() => "Ping",
             MapAction::ServerStats(_) => "ServerStats",
             MapAction::PlayerTestMode(_) => "PlayerTestMode",
+            MapAction::VehicleSample(_) => "VehicleSample",
         }
     }
 }
@@ -1213,6 +1229,22 @@ mod tests {
         // pre-v6 message types stay ungated
         assert_eq!(MapAction::Ping().min_proto_version(), 0);
         assert_eq!(MapAction::ServerStats(3).min_proto_version(), 0);
+    }
+
+    #[test]
+    fn vehicle_sample_action_flags() {
+        let a = MapAction::VehicleSample(vec![1, 0, 0, 0, 0, 0]);
+        assert!(a.is_ephemeral());
+        assert_eq!(a.min_proto_version(), 6);
+        assert_eq!(a.get_type(), "VehicleSample");
+        assert_eq!(MAPPING_MSG_VEHICLE_SAMPLE, 24);
+        // VehiclePos predates v5 and must stay ungated: live v5 clients rely
+        // on it (v6 clients dual-send both during the transition).
+        let vp = MapAction::VehiclePos(PlayerVehiclePos {
+            mat: [[0.0; 3]; 4],
+            vel: [0.0; 3],
+        });
+        assert_eq!(vp.min_proto_version(), 0);
     }
 
     #[test]
