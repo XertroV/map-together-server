@@ -85,7 +85,8 @@ Planned fmt-2 candidates (appended): 4×u8 wheel slip, 4×u8 damper length
 In `EditorFeed::CheckUpdateVehicle`, with two cadence changes: **no random
 jitter** on the vehicle tick (decision 2), and the interval scales with the
 number of players concurrently sending samples, not room size (decision 4):
-`intervalMs = clamp(50 × max(1, nActiveVehicleSenders), 50, 100)`.
+`intervalMs = clamp(15 × max(1, nActiveVehicleSenders), 50, 100)` —
+full 20 Hz up to 3 concurrent drivers, degrading only past that.
 
 - iso4 via the existing single `Dev::GetOffsetIso4(vis, O_VEHICLEVIS_ISO4)`
   call; extract pos/dir/up columns.
@@ -165,7 +166,7 @@ buffered corner path bends, not chords).
    ungated it would warn-spam v5 logs at 20 Hz and waste bandwidth. Dual-send
    exists so v5 peers keep *seeing* cars, not to protect them from crashes.
 4. **Cadence scales with concurrent vehicle senders, not room size:**
-   `intervalMs = clamp(50 × max(1, nActiveVehicleSenders), 50, 100)` where
+   `intervalMs = clamp(15 × max(1, nActiveVehicleSenders), 50, 100)` where
    nActiveVehicleSenders = players whose VehicleSample was seen in the last
    ~2 s (locally: we're sending iff in test mode). Room size no longer
    throttles car updates; ceiling tunable after playtests.
@@ -209,7 +210,7 @@ orthonormal). dir+up stays.
   (game-launch relative) — all clock mapping is per-stream.
 - **Decisions locked (2026-09-01):** RPM in fmt 1; zero send jitter for
   VehicleSample; dual-send kept (v5 verifiably skips unknown msgs cleanly,
-  but stays gated to avoid 20 Hz warn-spam); cadence scales with concurrent
-  vehicle senders (clamp 50–100 ms), not room size; ghost-car renderer is a
+  but stays gated to avoid 20 Hz warn-spam); cadence 15 ms × concurrent
+  vehicle senders clamped 50–100 ms (20 Hz up to 3 drivers), not room size; ghost-car renderer is a
   separate follow-up; dir+up beats full iso4 (left is rebuilt per-frame by
   the interpolator anyway).
