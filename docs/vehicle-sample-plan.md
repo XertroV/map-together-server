@@ -1,6 +1,9 @@
 # VehicleSample: replay-quality vehicle updates (protocol v6)
 
-Status: PLAN (2026-09-01). Supersedes `VehiclePos` (msg 15). Ships in
+Status: IMPLEMENTED (2026-09-01) — server: commit `78f468c` (tests green);
+plugin: branch `vehicle-sample` commit `22a88eb` (openplanet-lsp clean,
+**awaiting in-game unittest build + lifecycle validation** before merging to
+master). Supersedes `VehiclePos` (msg 15). Ships in
 **protocol v6** — v6 is still unreleased (only v5 clients are live), so
 VehicleSample rides the same bump as PlayerTestMode with no extra version.
 The 2026-08-30 bench (`MapTogether_VehiclePosRoundTrip`,
