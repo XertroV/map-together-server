@@ -54,7 +54,7 @@ Outer framing is the standard ephemeral message, new id:
 | 59 | u8 | brake | InputBrakePedal 0–255 (0 = not braking) |
 | 60 | u8 | wheelContact | bits 0–3 = FL,FR,RL,RR ground contact; bits 4–7 reserved |
 | 61 | u8 | misc | bit0 handbrake, bit1 turbo, bit2 in-water; rest reserved |
-| 62 | u16 | rpmDiv50 | engine RPM / 50 (0 if unavailable) — engine audio/anim later |
+| 62 | u16 | rpm | raw engine RPM (0 if unavailable); uint16 already covers typical TM range (<65k) — engine audio/anim later |
 
 **Versioning rule (append-only):** new fields are appended, `fmt` bumps.
 A reader that knows fmt N reads its known layout and ignores the tail (outer
@@ -155,7 +155,7 @@ buffered corner path bends, not chords).
 
 ## Decisions (Max, 2026-09-01)
 
-1. **RPM in fmt 1: yes** (u16 `rpmDiv50`).
+1. **RPM in fmt 1: yes** (u16 `rpm`, raw — no /50; uint16 max is 65535).
 2. **Send jitter: none for VehicleSample.** The vehicle tick drops its random
    delay entirely (cursor updates keep theirs); timestamped + buffered interp
    removes the anti-burst rationale.

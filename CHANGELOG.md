@@ -1,5 +1,7 @@
 # Changelog (agent-facing protocol/conventions)
 
+- 2026-09-01: VehicleSample fmt 1 RPM is raw u16 (`rpm`, not `/50`); uint16 already covers typical engine RPM (<65k). Field renamed `rpmDiv50` → `rpm`. v6 unreleased, no fmt bump.
+
 - 2026-09-01: VehicleSample msg (24, v6+, ephemeral): opaque self-versioned payload (leading fmt byte, append-only layout, ≤512B) relayed verbatim — payload fmt bumps need no server deploy. Replaces VehiclePos for v6 clients (dual-send keeps v5 peers seeing cars). Full spec + plugin replay design: docs/vehicle-sample-plan.md. Also verified: the live v5 client skips unknown msg types (warn-spam, not crash) — min_proto_version gating stays regardless.
 
 - 2026-09-01: connection-handling hardening (src/): TCP keepalive on accept (dead peers reaped ~2 min; live conns were 45+ days stale); pre-auth/handshake read timeouts + 10s auth HTTP timeout; 4 remote-panic bounds checks in read_map_msg; room action-loop deadlock + expired-room leak fixed; player_left now by connection identity (reconnect no longer ghost-removes the new session); Admin_SetRoomPlayerLimit now updates the enforced limit (owner-sent). deploy.py: `deploy` auto-uses switch-mode waiter when legacy run.sh still owns the port (plain restart would AddrInUse-crash-loop). Wire protocol unchanged.
