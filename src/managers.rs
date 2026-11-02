@@ -582,16 +582,26 @@ impl Player {
     }
 
     pub async fn shutdown(&self) {
-        // wake the read loop (it selects on shutdown_rx); ignore full/closed
+        // Wake the supervisor before waiting for the write lock: it cancels
+        // both loops and releases a writer blocked on this same socket.
         let _ = self.shutdown_tx.try_send(());
-        let _ = self.stream_w.write().await.shutdown().await;
+        if time::timeout(Duration::from_secs(1), async {
+            let _ = self.stream_w.write().await.shutdown().await;
+        }).await.is_err() {
+            log::warn!("Timed out shutting down player {:?}", self.get_name());
+        }
     }
 
     pub async fn shutdown_err(&self, arg: &str) {
-        let mut stream = self.stream_w.write().await;
-        let _ = stream.write_all(b"ERR").await;
-        let _ = write_lp_string_owh(&mut stream, arg).await;
-        drop(stream);
+        // Error delivery is best effort. A stalled writer/peer must not keep
+        // us from signalling shutdown and releasing the connection forever.
+        if time::timeout(Duration::from_secs(1), async {
+            let mut stream = self.stream_w.write().await;
+            let _ = stream.write_all(b"ERR").await;
+            let _ = write_lp_string_owh(&mut stream, arg).await;
+        }).await.is_err() {
+            log::warn!("Timed out sending shutdown error to player {:?}", self.get_name());
+        }
         self.shutdown().await;
     }
 

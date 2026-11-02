@@ -121,7 +121,7 @@ flow grew out of): `just restart-when-idle --idle-mins 30` on the dev box
 | Path | What |
 |------|------|
 | `deploy.py` | deploy tool (this whole flow; `--dry-run` available) |
-| `update-servers.sh` | legacy: build + scp over live servers (pre-idle-restart) |
+| `update-servers.sh` | build + stage binaries on all hosts; reports upload failures, but does not restart servers (use `just deploy` for the full flow) |
 | `restart-when-idle.sh` | dev-box variant: wait 0 conns, `systemctl --user restart map-together-dev` |
 | `justfile` | `just deploy` / `deploy-check` / `deploy-logs` / `restart-when-idle` |
 
